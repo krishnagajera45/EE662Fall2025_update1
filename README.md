@@ -1,4 +1,4 @@
-# EE662Fall2021
+# EE662Fall2025
 
 WsnLab.py is a simulation library in Python based on WsnSimPy for self-organized networks.
 
