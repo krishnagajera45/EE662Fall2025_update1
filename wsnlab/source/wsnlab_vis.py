@@ -189,10 +189,10 @@ class Simulator(wsnlab.Simulator):
            Returns:
         """
         if self.visual:
-            self.env.process(self._update_time())
-            thr = Thread(target=super().run)
-            thr.setDaemon(True)
+            self.env.process(self._update_time()) #KG-Update the time in the scene
+            thr = Thread(target=super().run) #KG-Start the base run method in a new thread
+            thr.setDaemon(True) #KG-Set the thread as a daemon thread
             thr.start()
-            self.tkplot.tk.mainloop()
+            self.tkplot.tk.mainloop() #KG-Start the main loop of the Tkinter window
         else:
             super().run()
