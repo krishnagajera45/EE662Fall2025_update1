@@ -25,3 +25,8 @@ HEARTH_BEAT_TIME_INTERVAL = 100
 REPAIRING_METHOD = 'FIND_ANOTHER_PARENT' # 'ALL_ORPHAN', 'FIND_ANOTHER_PARENT'
 EXPORT_CH_CSV_INTERVAL = 10  # simulation time units;
 EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # simulation time units;
+
+# #KG-Debugging controls (optional)
+# If True, neighbor/multihop tables will be printed to DEBUG_LOG_PATH
+DEBUG = True
+DEBUG_LOG_PATH = 'wsn_debug.log'

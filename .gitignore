@@ -143,3 +143,8 @@ node_distance_matrix.csv
 node_distances.csv
 neighbor_distances.csv
 Cluster_Tree_Mesh
+wsn_debug.log
+*.pdf
+*.csv
+clusterhead_distances.csv
+clusterhead_distances.csv

@@ -64,6 +64,14 @@ class SensorNode(wsn.Node):
         self.child_networks_table = {}
         self.members_table = []
         self.received_JR_guis = []  # keeps received Join Request global unique ids
+        #KG- neighbor discovery (multi-hop)
+        #KG- direct next-hops to neighbors discovered via heartbeats
+        self.one_hop_next = {}     # gui -> next-hop Addr (direct neighbor)
+        #KG- two-hop next-hops learned by neighbor-table sharing
+        self.two_hop_next = {}     # gui -> next-hop Addr (via a neighbor)
+        #KG- debug controls
+        self.debug_enabled = getattr(config, 'DEBUG', False)
+        self.debug_log_path = getattr(config, 'DEBUG_LOG_PATH', 'wsn_debug.log')
 
     ###################
     def run(self):
@@ -138,10 +146,34 @@ class SensorNode(wsn.Node):
             x2, y2 = NODE_POS[pck['gui']]
             pck['distance'] = math.hypot(x1 - x2, y1 - y2)
         self.neighbors_table[pck['gui']] = pck
+        #KG- learn direct next-hop for this neighbor (1-hop)
+        if 'addr' in pck:
+            self.one_hop_next[pck['gui']] = pck['addr']
+        #KG- learn two-hop via neighbor's neighbor list (shared in heartbeat)
+        for n2 in pck.get('nbrs', []) or []:
+            if 'addr' in pck:
+                self.two_hop_next[n2] = pck['addr']
 
         if pck['gui'] not in self.child_networks_table.keys() or pck['gui'] not in self.members_table:
             if pck['gui'] not in self.candidate_parents_table:
                 self.candidate_parents_table.append(pck['gui'])
+        #KG- optional debug dump
+        if getattr(self, 'debug_enabled', False):
+            try:
+                with open(self.debug_log_path, 'a') as f:
+                    f.write(f"[{self.now:10.5f}] Node {self.id}: NEIGHBOR UPDATE from {pck['gui']}\n")
+                    # summarize neighbors_table
+                    ng = ", ".join(
+                        f"{gui}:hop{pp.get('hop_count','?')}" for gui, pp in self.neighbors_table.items()
+                    )
+                    f.write(f"  neighbors[{len(self.neighbors_table)}] => {ng}\n")
+                    # 1-hop and 2-hop maps
+                    oh = ", ".join(f"{gui}:{_addr_str(a)}" for gui, a in self.one_hop_next.items())
+                    th = ", ".join(f"{gui}:{_addr_str(a)}" for gui, a in self.two_hop_next.items())
+                    f.write(f"  one_hop[{len(self.one_hop_next)}] => {oh}\n")
+                    f.write(f"  two_hop[{len(self.two_hop_next)}] => {th}\n")
+            except Exception:
+                pass
 
     ###################
     def select_and_join(self):
@@ -176,6 +208,19 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        #KG- compute my immediate neighbors (1-hop) by distance threshold for table sharing
+        my_neighbors = []
+        try:
+            if self.id in NODE_POS:
+                x1, y1 = NODE_POS[self.id]
+                for gui, (x2, y2) in NODE_POS.items():
+                    if gui == self.id:
+                        continue
+                    if math.hypot(x1 - x2, y1 - y2) <= self.tx_range:
+                        my_neighbors.append(gui)
+        except Exception:
+            my_neighbors = []
+
         self.send({'dest': wsn.BROADCAST_ADDR,
                    'type': 'HEART_BEAT',
                    'source': self.ch_addr if self.ch_addr is not None else self.addr,
@@ -183,7 +228,8 @@ class SensorNode(wsn.Node):
                    'role': self.role,
                    'addr': self.addr,
                    'ch_addr': self.ch_addr,
-                   'hop_count': self.hop_count})
+                   'hop_count': self.hop_count,
+                   'nbrs': my_neighbors})#KG- share my immediate neighbors for table sharing
 
     ###################
     def send_join_request(self, dest):
