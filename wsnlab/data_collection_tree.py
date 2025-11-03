@@ -161,17 +161,17 @@ class SensorNode(wsn.Node):
         if getattr(self, 'debug_enabled', False):
             try:
                 with open(self.debug_log_path, 'a') as f:
-                    f.write(f"[{self.now:10.5f}] Node {self.id}: NEIGHBOR UPDATE from {pck['gui']}\n")
-                    # summarize neighbors_table
-                    ng = ", ".join(
-                        f"{gui}:hop{pp.get('hop_count','?')}" for gui, pp in self.neighbors_table.items()
+                    # Simple, single-line snapshot with key fields
+                    # [time] N<me> from=<src> role=<role> hop=<my_hop> parent=<pg> neighs=<count>(<ids>) 1hop=<ids> 2hop=<ids>
+                    one_ids = ",".join(str(g) for g in sorted(self.one_hop_next.keys()))
+                    two_ids = ",".join(str(g) for g in sorted(self.two_hop_next.keys()))
+                    n_ids  = ",".join(str(g) for g in sorted(self.neighbors_table.keys()))
+                    f.write(
+                        f"[{self.now:10.5f}] N{self.id} from={pck['gui']} role={_role_name(self.role)} "
+                        f"hop={self.hop_count} parent={self.parent_gui} "
+                        f"neighs={len(self.neighbors_table)}({n_ids or '-'}) "
+                        f"1hop={one_ids or '-'} 2hop={two_ids or '-'}\n"
                     )
-                    f.write(f"  neighbors[{len(self.neighbors_table)}] => {ng}\n")
-                    # 1-hop and 2-hop maps
-                    oh = ", ".join(f"{gui}:{_addr_str(a)}" for gui, a in self.one_hop_next.items())
-                    th = ", ".join(f"{gui}:{_addr_str(a)}" for gui, a in self.two_hop_next.items())
-                    f.write(f"  one_hop[{len(self.one_hop_next)}] => {oh}\n")
-                    f.write(f"  two_hop[{len(self.two_hop_next)}] => {th}\n")
             except Exception:
                 pass
 
