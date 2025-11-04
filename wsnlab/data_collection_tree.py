@@ -482,6 +482,7 @@ class SensorNode(wsn.Node):
         elif name == 'TIMER_EXPORT_NEIGHBOR_CSV':
             if self.role == Roles.ROOT:
                 write_neighbor_distances_csv("neighbor_distances.csv")
+                write_multihop_neighbors_csv("multihop_neighbors.csv")
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
 
 
@@ -601,6 +602,43 @@ def write_neighbor_distances_csv(path="neighbor_distances.csv", dedupe_undirecte
                 at  = pck.get("arrival_time", "")
 
                 w.writerow([node.id, n_gui, f"{dist:.6f}", n_role, hop, at])
+
+###########################################################
+def write_multihop_neighbors_csv(path="multihop_neighbors.csv"):
+    """
+    KG-Export 1-hop and 2-hop neighbor knowledge.
+    Columns: node_id, target_gui, hop, next_hop_addr, geometric_distance
+    """
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["node_id", "target_gui", "hop", "next_hop_addr", "geometric_distance"])
+
+        for node in sim.nodes:
+            if not hasattr(node, "neighbors_table"):
+                continue
+
+            x1, y1 = NODE_POS.get(node.id, (None, None))
+            if x1 is None:
+                continue
+
+            # 1-hop entries from neighbors_table
+            for n_gui, pck in getattr(node, "neighbors_table", {}).items():
+                x2, y2 = NODE_POS.get(n_gui, (None, None))
+                if x2 is None:
+                    continue
+                dist = pck.get("distance")
+                if dist is None:
+                    dist = math.hypot(x1 - x2, y1 - y2)
+                w.writerow([node.id, n_gui, 1, _addr_str(pck.get('addr')), f"{dist:.6f}"])
+
+            # 2-hop entries from learned map
+            for n2_gui, via_addr in getattr(node, "two_hop_next", {}).items():
+                x2, y2 = NODE_POS.get(n2_gui, (None, None))
+                if x2 is None:
+                    continue
+                dist2 = math.hypot(x1 - x2, y1 - y2)
+                w.writerow([node.id, n2_gui, 2, _addr_str(via_addr), f"{dist2:.6f}"])
+
 
 ###########################################################
 def create_network(node_class, number_of_nodes=100):
