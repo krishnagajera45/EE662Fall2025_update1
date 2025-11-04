@@ -69,6 +69,13 @@ class SensorNode(wsn.Node):
         self.one_hop_next = {}     # gui -> next-hop Addr (direct neighbor)
         #KG- two-hop next-hops learned by neighbor-table sharing
         self.two_hop_next = {}     # gui -> next-hop Addr (via a neighbor)
+
+        # --- NEW: generalized K-hop neighbor map ---
+        # gui -> {'next_hop': Addr, 'hop': int}
+        self.k_hop_next = {}
+        # How far to propagate (and keep) neighbor info. If not set in config.py, default to 3.
+        self.k_max = getattr(config, 'NEIGHBOR_K_MAX', 3)
+
         #KG- debug controls
         self.debug_enabled = getattr(config, 'DEBUG', False)
         self.debug_log_path = getattr(config, 'DEBUG_LOG_PATH', 'wsn_debug.log')
@@ -154,6 +161,46 @@ class SensorNode(wsn.Node):
             if 'addr' in pck:
                 self.two_hop_next[n2] = pck['addr']
 
+        # --- K-hop neighbor map merge ---
+        # A) Neighbor itself at hop=1 (via its addr)
+        try:
+            nh = pck.get('addr')
+            if nh is not None:
+                cur = self.k_hop_next.get(pck['gui'])
+                if cur is None or cur.get('hop', 1e9) > 1:
+                    self.k_hop_next[pck['gui']] = {'next_hop': nh, 'hop': 1}
+        except Exception:
+            pass
+
+        # B) Legacy 2-hop from 'nbrs' → our hop=2 (if enabled by K)
+        for n2 in pck.get('nbrs', []) or []:
+            via = nh
+            if via is None:
+                continue
+            cur = self.k_hop_next.get(n2)
+            if cur is None or 2 < cur.get('hop', 1e9):
+                if 2 <= self.k_max:
+                    self.k_hop_next[n2] = {'next_hop': via, 'hop': 2}
+
+        # C) General K-map: pck shares (tgt, h). We adopt (h+1) via neighbor.
+        for tgt, h in (pck.get('nbrs_k', {}) or {}).items():
+            try:
+                hh = int(h)
+            except Exception:
+                continue
+            via = nh
+            if via is None:
+                continue
+            cand_h = hh + 1
+            if cand_h > self.k_max:
+                continue
+            if tgt == self.id:
+                continue  # ignore self
+            cur = self.k_hop_next.get(tgt)
+            if cur is None or cand_h < cur.get('hop', 1e9):
+                self.k_hop_next[tgt] = {'next_hop': via, 'hop': cand_h}
+                self._dbg(f"DV_KSHARE from={pck['gui']} tgt={tgt} hop={cand_h} via={_addr_str(via)}")
+
         if pck['gui'] not in self.child_networks_table.keys() or pck['gui'] not in self.members_table:
             if pck['gui'] not in self.candidate_parents_table:
                 self.candidate_parents_table.append(pck['gui'])
@@ -174,6 +221,52 @@ class SensorNode(wsn.Node):
                     )
             except Exception:
                 pass
+
+    ###################
+    def _dbg(self, line):
+        """KG- append a single-line debug message if debug is enabled."""
+        if not getattr(self, 'debug_enabled', False):
+            return
+        try:
+            with open(self.debug_log_path, 'a') as f:
+                f.write(f"[{self.now:10.5f}] N{self.id} {line}\n")
+        except Exception:
+            pass
+
+    ###################
+    def _prepare_and_send(self, pck):
+        """KG- Enforce TTL and no-progress loop guards before sending routed packets."""
+        try:
+            # Initialize or decrement TTL for directed packets
+            if pck.get('dest') not in (None, wsn.BROADCAST_ADDR):
+                if 'ttl' not in pck:
+                    # default ttl scales with k_max
+                    pck['ttl'] = max(8, 2 * int(getattr(self, 'k_max', 3)))
+                else:
+                    pck['ttl'] -= 1
+                    if pck['ttl'] <= 0:
+                        self._dbg(f"DROP ttl0 type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
+                        return
+
+                # no-progress: avoid forwarding to self or repeating same hop
+                nh = pck.get('next_hop')
+                if nh in (self.addr, self.ch_addr):
+                    self._dbg(f"DROP self_next_hop type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
+                    return
+                if pck.get('last_hop') == self.addr:
+                    self._dbg(f"DROP repeat_hop type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
+                    return
+                # require next_hop for directed packets not for me
+                if (pck.get('dest') != self.addr and pck.get('dest') != self.ch_addr) and nh is None:
+                    self._dbg(f"DROP no_next_hop type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
+                    return
+
+                pck['last_hop'] = self.addr
+        except Exception:
+            # never crash on guard
+            pass
+
+        self.send(pck)
 
     ###################
     def select_and_join(self):
@@ -221,6 +314,9 @@ class SensorNode(wsn.Node):
         except Exception:
             my_neighbors = []
 
+        #KG- Build K-1 hop share map (receiver will +1 on receive)
+        share_kmap = self._build_kshare_map()
+
         self.send({'dest': wsn.BROADCAST_ADDR,
                    'type': 'HEART_BEAT',
                    'source': self.ch_addr if self.ch_addr is not None else self.addr,
@@ -229,7 +325,34 @@ class SensorNode(wsn.Node):
                    'addr': self.addr,
                    'ch_addr': self.ch_addr,
                    'hop_count': self.hop_count,
-                   'nbrs': my_neighbors})#KG- share my immediate neighbors for table sharing
+                   'nbrs': my_neighbors,
+                   'nbrs_k': share_kmap})  # <— NEW
+
+    ###################
+    def _build_kshare_map(self):
+        """KG- Build K-1 hop share map (receiver adds +1)."""
+        try:
+            share_kmap = {}
+            # 1) ensure 1-hop entries exist, cache in k_hop_next
+            for gui, hb in (self.neighbors_table or {}).items():
+                nh = hb.get('addr') if isinstance(hb, dict) else None
+                if nh is not None:
+                    share_kmap[gui] = 1
+                    cur = self.k_hop_next.get(gui)
+                    if cur is None or cur.get('hop', 10**9) > 1:
+                        self.k_hop_next[gui] = {'next_hop': nh, 'hop': 1}
+            # 2) include current K-hop knowledge up to K-1
+            for tgt, rec in list(self.k_hop_next.items()):
+                try:
+                    h = int(rec.get('hop', 999999))
+                except Exception:
+                    h = 999999
+                if h <= max(1, self.k_max - 1):
+                    prev = share_kmap.get(tgt)
+                    share_kmap[tgt] = h if prev is None else min(prev, h)
+            return share_kmap
+        except Exception:
+            return {}
 
     ###################
     def send_join_request(self, dest):
@@ -290,7 +413,7 @@ class SensorNode(wsn.Node):
                         pck['next_hop'] = self.neighbors_table[child_gui]['addr']
                         break
 
-        self.send(pck)
+        self._prepare_and_send(pck)
 
     ###################
     def send_network_request(self):
@@ -605,39 +728,31 @@ def write_neighbor_distances_csv(path="neighbor_distances.csv", dedupe_undirecte
 
 ###########################################################
 def write_multihop_neighbors_csv(path="multihop_neighbors.csv"):
-    """
-    KG-Export 1-hop and 2-hop neighbor knowledge.
-    Columns: node_id, target_gui, hop, next_hop_addr, geometric_distance
-    """
+    """Export 1..K-hop neighbor knowledge using k_hop_next."""
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["node_id", "target_gui", "hop", "next_hop_addr", "geometric_distance"])
-
         for node in sim.nodes:
-            if not hasattr(node, "neighbors_table"):
+            if not hasattr(node, 'k_hop_next'):
                 continue
-
             x1, y1 = NODE_POS.get(node.id, (None, None))
             if x1 is None:
                 continue
-
-            # 1-hop entries from neighbors_table
-            for n_gui, pck in getattr(node, "neighbors_table", {}).items():
-                x2, y2 = NODE_POS.get(n_gui, (None, None))
+            for tgt, rec in node.k_hop_next.items():
+                x2, y2 = NODE_POS.get(tgt, (None, None))
                 if x2 is None:
                     continue
-                dist = pck.get("distance")
-                if dist is None:
+                try:
                     dist = math.hypot(x1 - x2, y1 - y2)
-                w.writerow([node.id, n_gui, 1, _addr_str(pck.get('addr')), f"{dist:.6f}"])
-
-            # 2-hop entries from learned map
-            for n2_gui, via_addr in getattr(node, "two_hop_next", {}).items():
-                x2, y2 = NODE_POS.get(n2_gui, (None, None))
-                if x2 is None:
-                    continue
-                dist2 = math.hypot(x1 - x2, y1 - y2)
-                w.writerow([node.id, n2_gui, 2, _addr_str(via_addr), f"{dist2:.6f}"])
+                except Exception:
+                    dist = None
+                w.writerow([
+                    node.id,
+                    tgt,
+                    rec.get('hop', ''),
+                    _addr_str(rec.get('next_hop')),
+                    f"{dist:.6f}" if dist is not None else ''
+                ])
 
 
 ###########################################################
