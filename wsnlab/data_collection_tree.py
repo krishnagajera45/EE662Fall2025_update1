@@ -201,7 +201,7 @@ class SensorNode(wsn.Node):
                 self.k_hop_next[tgt] = {'next_hop': via, 'hop': cand_h}
                 self._dbg(f"DV_KSHARE from={pck['gui']} tgt={tgt} hop={cand_h} via={_addr_str(via)}")
 
-        if pck['gui'] not in self.child_networks_table.keys() or pck['gui'] not in self.members_table:
+        if (pck['gui'] not in self.child_networks_table) and (pck['gui'] not in self.members_table):
             if pck['gui'] not in self.candidate_parents_table:
                 self.candidate_parents_table.append(pck['gui'])
         #KG- optional debug dump
@@ -250,8 +250,11 @@ class SensorNode(wsn.Node):
 
                 # no-progress: avoid forwarding to self or repeating same hop
                 nh = pck.get('next_hop')
-                if nh in (self.addr, self.ch_addr):
+                if nh == self.addr:
                     self._dbg(f"DROP self_next_hop type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
+                    return
+                if nh == self.ch_addr and pck.get('dest') != self.ch_addr:
+                    self._dbg(f"DROP ch_next_hop_but_not_dest type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
                     return
                 if pck.get('last_hop') == self.addr:
                     self._dbg(f"DROP repeat_hop type={pck.get('type')} dest={_addr_str(pck.get('dest'))}")
