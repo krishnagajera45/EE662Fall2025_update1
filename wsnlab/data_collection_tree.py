@@ -613,7 +613,7 @@ class SensorNode(wsn.Node):
 
 
 
-ROOT_ID = random.randrange(config.SIM_NODE_COUNT)  # 0..count-1
+ROOT_ID = 1  # 0..count-1
 
 
 
