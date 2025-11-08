@@ -6,6 +6,8 @@ from source import wsnlab_vis as wsn
 import math
 from source import config
 from collections import Counter
+import os
+import hashlib
 
 
 import csv  # <— add this near your other imports
@@ -405,17 +407,74 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        dest = pck['dest']
+        path_type = None
+        # clear previous decision-specific metadata
+        pck.pop('_mesh_hop', None)
+
+        # 1) Mesh-first: try to deliver using local/multihop knowledge
+        # 1a) direct neighbor check via neighbors_table
+        try:
+            for entry in self.neighbors_table.values():
+                if entry.get('addr') == dest or entry.get('ch_addr') == dest:
+                    pck['next_hop'] = dest
+                    path_type = 'DIRECT'
+                    self._dbg(f"ROUTE DIRECT type={pck.get('type')} src={_addr_str(pck.get('source'))} dest={_addr_str(dest)} next={_addr_str(pck['next_hop'])}")
+                    log_packet_route(pck, self, pck['next_hop'], path_type)
+                    self._prepare_and_send(pck)
+                    return
+        except Exception:
+            pass
+
+        # 1b) K-hop knowledge via DV map: find GUI for dest, then use k_hop_next
+        try:
+            dest_gui = None
+            for n in self.sim.nodes:
+                if (getattr(n, 'addr', None) is not None and n.addr == dest) or \
+                   (getattr(n, 'ch_addr', None) is not None and n.ch_addr == dest):
+                    dest_gui = n.id
+                    break
+            if dest_gui is not None:
+                rec = self.k_hop_next.get(dest_gui)
+                if rec and rec.get('next_hop') is not None:
+                    pck['next_hop'] = rec['next_hop']
+                    path_type = 'MESH'
+                    try:
+                        pck['_mesh_hop'] = int(rec.get('hop'))
+                    except Exception:
+                        pck['_mesh_hop'] = ''
+                    self._dbg(f"ROUTE MESH type={pck.get('type')} src={_addr_str(pck.get('source'))} dest={_addr_str(dest)} next={_addr_str(pck['next_hop'])} hop={rec.get('hop')}")
+                    log_packet_route(pck, self, pck['next_hop'], path_type)
+                    self._prepare_and_send(pck)
+                    return
+        except Exception:
+            pass
+
+        # 2) Tree fallback
         if self.role != Roles.ROOT:
-            pck['next_hop'] = self.neighbors_table[self.parent_gui]['ch_addr']
+            # default up to parent
+            try:
+                pck['next_hop'] = self.neighbors_table[self.parent_gui]['ch_addr']
+                path_type = 'TREE_PARENT'
+            except Exception:
+                 pck['next_hop'] = None
         if self.ch_addr is not None:
-            if pck['dest'].net_addr == self.ch_addr.net_addr:
-                pck['next_hop'] = pck['dest']
+            if dest.net_addr == self.ch_addr.net_addr:
+                pck['next_hop'] = dest
+                path_type = 'TREE_SAME_NET'
             else:
                 for child_gui, child_networks in self.child_networks_table.items():
-                    if pck['dest'].net_addr in child_networks:
-                        pck['next_hop'] = self.neighbors_table[child_gui]['addr']
+                    if dest.net_addr in child_networks:
+                        try:
+                            pck['next_hop'] = self.neighbors_table[child_gui]['addr']
+                            path_type = 'TREE_CHILD'
+                        except Exception:
+                            pass
                         break
 
+        self._dbg(f"ROUTE {path_type or 'TREE'} type={pck.get('type')} src={_addr_str(pck.get('source'))} dest={_addr_str(dest)} next={_addr_str(pck.get('next_hop'))}")
+        log_packet_route(pck, self, pck.get('next_hop'), path_type or 'TREE')
+ 
         self._prepare_and_send(pck)
 
     ###################
@@ -630,6 +689,74 @@ def write_node_distances_csv(path="node_distances.csv"):
                 dist = math.hypot(x1 - x2, y1 - y2)
                 w.writerow([sid, tid, f"{dist:.6f}"])
 
+# Routing CSV logger
+ROUTE_CSV_PATH = getattr(config, 'ROUTE_CSV_PATH', 'packet_routes.csv')
+ROUTE_STATS = Counter()
+
+def log_packet_route(pck, current_node, next_hop, path_type):
+    try:
+        need_header = not os.path.exists(ROUTE_CSV_PATH) or os.path.getsize(ROUTE_CSV_PATH) == 0
+        with open(ROUTE_CSV_PATH, 'a', newline='') as f:
+            w = csv.writer(f)
+            if need_header:
+                w.writerow([
+                    "time", "packet_type",
+                    "source", "src_gui",
+                    "current_node", "role",
+                    "next_hop", "next_hop_gui",
+                    "dest", "dest_gui",
+                    "hop_to_root", "ttl",
+                    "neighbor_count", "kmap_size", "members_count",
+                    "trace_len", "mesh_hop",
+                    "path_type"
+                ])
+            now = getattr(current_node, 'now', '')
+            ptype = pck.get('type', '')
+            src = _addr_str(pck.get('source'))
+            dest = _addr_str(pck.get('dest'))
+            # helpers to resolve GUI ids from addresses
+            def _gui_for_addr(addr):
+                if addr is None:
+                    return ''
+                try:
+                    for n in current_node.sim.nodes:
+                        if (getattr(n, 'addr', None) is not None and n.addr == addr) or \
+                           (getattr(n, 'ch_addr', None) is not None and n.ch_addr == addr):
+                            return n.id
+                except Exception:
+                    return ''
+                return ''
+
+            row = []
+            row.append(f"{now:.5f}" if isinstance(now, (int, float)) else now)
+            row.append(ptype)
+            row.append(src)
+            row.append(_gui_for_addr(pck.get('source')))
+            row.append(current_node.id)
+            row.append(_role_name(getattr(current_node, 'role', '')))
+            row.append(_addr_str(next_hop))
+            row.append(_gui_for_addr(next_hop))
+            row.append(dest)
+            row.append(_gui_for_addr(pck.get('dest')))
+            row.append(getattr(current_node, 'hop_count', ''))
+            row.append(pck.get('ttl', ''))
+            row.append(len(getattr(current_node, 'neighbors_table', {}) or {}))
+            row.append(len(getattr(current_node, 'k_hop_next', {}) or {}))
+            row.append(len(getattr(current_node, 'members_table', []) or []))
+            row.append(len(pck.get('route_gui', []) or []))
+            row.append(pck.get('_mesh_hop', ''))
+            row.append(path_type)
+            w.writerow(row)
+            # update simple in-memory stats for the run
+            try:
+                ROUTE_STATS['rows'] += 1
+                ROUTE_STATS[f"type:{ptype}"] += 1
+                ROUTE_STATS[f"path:{path_type}"] += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def write_node_distance_matrix_csv(path="node_distance_matrix.csv"):
     ids = sorted(NODE_POS.keys())
@@ -758,6 +885,56 @@ def write_multihop_neighbors_csv(path="multihop_neighbors.csv"):
                 ])
 
 
+def write_topology_csv(path="topology.csv"):
+    """Easy-to-read final topology snapshot for grading/inspection."""
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "node_id", "role", "addr", "ch_addr", "parent_gui",
+            "hop_count", "net_id", "neighbors", "members", "child_networks"
+        ])
+        for n in sim.nodes:
+            role = getattr(n, "role", None)
+            role_name = role.name if hasattr(role, "name") else str(role)
+            addr = _addr_str(getattr(n, "addr", None))
+            ch = _addr_str(getattr(n, "ch_addr", None))
+            parent = getattr(n, "parent_gui", "")
+            hop = getattr(n, "hop_count", "")
+            net_id = getattr(getattr(n, "ch_addr", None), "net_addr", "")
+            neigh_cnt = len(getattr(n, "neighbors_table", {}) or {})
+            mem_cnt = len(getattr(n, "members_table", []) or [])
+            child_cnt = len(getattr(n, "child_networks_table", {}) or {})
+            w.writerow([n.id, role_name, addr, ch, parent, hop, net_id, neigh_cnt, mem_cnt, child_cnt])
+
+
+def write_run_summary(path="run_summary.csv"):
+    """Small, uniform summary + fingerprint to compare runs/assignments."""
+    direct = ROUTE_STATS.get("path:DIRECT", 0)
+    mesh = ROUTE_STATS.get("path:MESH", 0)
+    tree_parent = ROUTE_STATS.get("path:TREE_PARENT", 0)
+    tree_same = ROUTE_STATS.get("path:TREE_SAME_NET", 0)
+    tree_child = ROUTE_STATS.get("path:TREE_CHILD", 0)
+    tree_total = tree_parent + tree_same + tree_child
+    rows = ROUTE_STATS.get("rows", 0)
+    seed = getattr(config, "SEED", "")
+    nodes = getattr(config, "SIM_NODE_COUNT", "")
+    fp_src = f"seed={seed}|nodes={nodes}|rows={rows}|direct={direct}|mesh={mesh}|tree={tree_total}"
+    fp = hashlib.sha1(fp_src.encode("utf-8")).hexdigest()[:12]
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "value"])
+        w.writerow(["nodes", nodes])
+        w.writerow(["rows_logged", rows])
+        w.writerow(["direct", direct])
+        w.writerow(["mesh", mesh])
+        w.writerow(["tree_parent", tree_parent])
+        w.writerow(["tree_same_net", tree_same])
+        w.writerow(["tree_child", tree_child])
+        w.writerow(["tree_total", tree_total])
+        w.writerow(["fingerprint", fp])
+    print(f"[summary] routes rows={rows} direct={direct} mesh={mesh} tree={tree_total} fp={fp}")
+
+
 ###########################################################
 def create_network(node_class, number_of_nodes=100):
     """Creates given number of nodes at random positions with random arrival times.
@@ -798,6 +975,8 @@ write_node_distance_matrix_csv("node_distance_matrix.csv")
 
 # start the simulation
 sim.run()
+write_topology_csv("topology.csv")
+write_run_summary("run_summary.csv")
 print("Simulation Finished")
 
 
