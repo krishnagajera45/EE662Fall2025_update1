@@ -17,7 +17,7 @@ SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1400, 1400)  #terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
 SIM_VISUALIZATION = True  # visualization active
-SCALE = 1  # scale factor for visualization
+SCALE = 0.8  # scale factor for visualization
 
 
 ## application properties
@@ -30,3 +30,9 @@ EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # simulation time units;
 # If True, neighbor/multihop tables will be printed to DEBUG_LOG_PATH
 DEBUG = True
 DEBUG_LOG_PATH = 'wsn_debug.log'
+
+# --- optional per-hop delay model (off by default) ---
+ENABLE_DELAY_MODEL = True     # set True to enable
+PROC_DELAY_MEAN = 0.5          # processing time at a node (sim time units)
+TX_DELAY_PER_HOP = 0.3         # transmission time per hop
+TX_DELAY_JITTER = 0.2          # +/- jitter added to total

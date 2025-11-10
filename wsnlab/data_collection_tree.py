@@ -82,6 +82,14 @@ class SensorNode(wsn.Node):
         self.debug_enabled = getattr(config, 'DEBUG', False)
         self.debug_log_path = getattr(config, 'DEBUG_LOG_PATH', 'wsn_debug.log')
 
+        # optional delay model config and state
+        self.delay_model = getattr(config, 'ENABLE_DELAY_MODEL', False)
+        self.proc_delay_mean = getattr(config, 'PROC_DELAY_MEAN', 0.0)
+        self.tx_delay_per_hop = getattr(config, 'TX_DELAY_PER_HOP', 0.0)
+        self.tx_delay_jitter = getattr(config, 'TX_DELAY_JITTER', 0.0)
+        self._tx_pending = []          # list of (send_time, packet_dict)
+        self._tx_timer_armed = False
+
     ###################
     def run(self):
         """Setting the arrival timer to wake up after firing.
@@ -235,10 +243,61 @@ class SensorNode(wsn.Node):
         except Exception:
             pass
 
+    def _tx_enqueue(self, pck, delay):
+        try:
+            send_at = self.now + max(0.0, delay)
+            self._tx_pending.append((send_at, pck))
+            try:
+                self._dbg(f"TX_ENQUEUE type={pck.get('type')} next={_addr_str(pck.get('next_hop'))} delay={max(0.0, delay):.3f} send_at={send_at:.3f}")
+            except Exception:
+                pass
+            # arm timer to the soonest item
+            if not self._tx_timer_armed:
+                self.set_timer('TIMER_TX_SEND', max(0.01, delay))
+                self._tx_timer_armed = True
+            else:
+                # if a sooner item appeared, re-arm earlier
+                soonest = min(t for t, _ in self._tx_pending) if self._tx_pending else self.now
+                delta = max(0.01, soonest - self.now)
+                self.set_timer('TIMER_TX_SEND', delta)
+        except Exception:
+            pass
+
+    def _tx_drain_due(self):
+        """Send all packets whose send_time <= now; re-arm if more remain."""
+        try:
+            now = self.now
+            due, future = [], []
+            for t, p in self._tx_pending:
+                (due if t <= now else future).append((t, p))
+            self._tx_pending = future
+            for _, pck in due:
+                # TTL/self-hop guards were already applied in _prepare_and_send
+                try:
+                    self._dbg(f"TX_SEND type={pck.get('type')} next={_addr_str(pck.get('next_hop'))}")
+                except Exception:
+                    pass
+                self.send(pck)
+            if self._tx_pending:
+                soonest = min(t for t, _ in self._tx_pending)
+                self.set_timer('TIMER_TX_SEND', max(0.01, soonest - now))
+                self._tx_timer_armed = True
+            else:
+                self._tx_timer_armed = False
+        except Exception:
+            self._tx_timer_armed = False
+
     ###################
     def _prepare_and_send(self, pck):
         """KG- Enforce TTL and no-progress loop guards before sending routed packets."""
         try:
+            # stamp creation time if missing
+            if 'created_at' not in pck:
+                pck['created_at'] = self.now
+                try:
+                    self._dbg(f"STAMP created_at type={pck.get('type')} dest={_addr_str(pck.get('dest'))} ts={self.now:.3f}")
+                except Exception:
+                    pass
             # Initialize or decrement TTL for directed packets
             if pck.get('dest') not in (None, wsn.BROADCAST_ADDR):
                 if 'ttl' not in pck:
@@ -271,7 +330,19 @@ class SensorNode(wsn.Node):
             # never crash on guard
             pass
 
-        self.send(pck)
+        if getattr(self, 'delay_model', False):
+            # simple per-hop model: processing + tx + jitter
+            d = float(getattr(self, 'proc_delay_mean', 0.0)) + float(getattr(self, 'tx_delay_per_hop', 0.0))
+            j = float(getattr(self, 'tx_delay_jitter', 0.0))
+            if j > 0:
+                d += random.uniform(-j, j)
+            self._tx_enqueue(pck, max(0.0, d))
+        else:
+            try:
+                self._dbg(f"TX_IMMEDIATE type={pck.get('type')} next={_addr_str(pck.get('next_hop'))}")
+            except Exception:
+                pass
+            self.send(pck)
 
     ###################
     def select_and_join(self):
@@ -295,7 +366,14 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
-        self.send({'dest': wsn.BROADCAST_ADDR, 'type': 'PROBE'})
+        # mark join start time on first probe
+        if not hasattr(self, '_join_started_at') or self._join_started_at is None:
+            self._join_started_at = self.now
+        try:
+            self._dbg(f"PKT_CREATE type=PROBE created_at={self.now:.3f}")
+        except Exception:
+            pass
+        self.send({'dest': wsn.BROADCAST_ADDR, 'type': 'PROBE', 'created_at': self.now})
 
     ###################
     def send_heart_beat(self):
@@ -331,7 +409,12 @@ class SensorNode(wsn.Node):
                    'ch_addr': self.ch_addr,
                    'hop_count': self.hop_count,
                    'nbrs': my_neighbors,
-                   'nbrs_k': share_kmap})  # <— NEW
+                   'nbrs_k': share_kmap,
+                   'created_at': self.now})  # <— NEW
+        try:
+            self._dbg(f"PKT_CREATE type=HEART_BEAT created_at={self.now:.3f}")
+        except Exception:
+            pass
 
     ###################
     def _build_kshare_map(self):
@@ -368,7 +451,11 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
-        self.send({'dest': dest, 'type': 'JOIN_REQUEST', 'gui': self.id})
+        try:
+            self._dbg(f"PKT_CREATE type=JOIN_REQUEST created_at={self.now:.3f}")
+        except Exception:
+            pass
+        self.send({'dest': dest, 'type': 'JOIN_REQUEST', 'gui': self.id, 'created_at': self.now})
 
     ###################
     def send_join_reply(self, gui, addr):
@@ -382,9 +469,13 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        try:
+            self._dbg(f"PKT_CREATE type=JOIN_REPLY created_at={self.now:.3f}")
+        except Exception:
+            pass
         self.send({'dest': wsn.BROADCAST_ADDR, 'type': 'JOIN_REPLY', 'source': self.ch_addr,
                    'gui': self.id, 'dest_gui': gui, 'addr': addr, 'root_addr': self.root_addr,
-                   'hop_count': self.hop_count+1})
+                   'hop_count': self.hop_count+1, 'created_at': self.now})
 
     ###################
     def send_join_ack(self, dest):
@@ -395,8 +486,12 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        try:
+            self._dbg(f"PKT_CREATE type=JOIN_ACK created_at={self.now:.3f}")
+        except Exception:
+            pass
         self.send({'dest': dest, 'type': 'JOIN_ACK', 'source': self.addr,
-                   'gui': self.id})
+                   'gui': self.id, 'created_at': self.now})
 
     ###################
     def route_and_forward_package(self, pck):
@@ -486,7 +581,7 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
-        self.route_and_forward_package({'dest': self.root_addr, 'type': 'NETWORK_REQUEST', 'source': self.addr})
+        self.route_and_forward_package({'dest': self.root_addr, 'type': 'NETWORK_REQUEST', 'source': self.addr, 'created_at': self.now})
 
     ###################
     def send_network_reply(self, dest, addr):
@@ -499,7 +594,7 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
-        self.route_and_forward_package({'dest': dest, 'type': 'NETWORK_REPLY', 'source': self.addr, 'addr': addr})
+        self.route_and_forward_package({'dest': dest, 'type': 'NETWORK_REPLY', 'source': self.addr, 'addr': addr, 'created_at': self.now})
 
     ###################
     def send_network_update(self):
@@ -515,7 +610,7 @@ class SensorNode(wsn.Node):
             child_networks.extend(networks)
 
         self.send({'dest': self.neighbors_table[self.parent_gui]['ch_addr'], 'type': 'NETWORK_UPDATE', 'source': self.addr,
-                   'gui': self.id, 'child_networks': child_networks})
+                   'gui': self.id, 'child_networks': child_networks, 'created_at': self.now})
 
     ###################
     def on_receive(self, pck):
@@ -526,6 +621,14 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # latency logging: if I am the destination of a directed packet, log delivery delay
+        try:
+            if pck.get('dest') not in (None, wsn.BROADCAST_ADDR):
+                if pck['dest'] == self.addr or pck['dest'] == self.ch_addr:
+                    log_packet_delivery(pck, self)
+        except Exception:
+            pass
+
         if self.role == Roles.ROOT or self.role == Roles.CLUSTER_HEAD:  # if the node is root or cluster head
             if 'next_hop' in pck.keys() and pck['dest'] != self.addr and pck['dest'] != self.ch_addr:  # forwards message if destination is not itself
                 self.route_and_forward_package(pck)
@@ -589,11 +692,25 @@ class SensorNode(wsn.Node):
                 self.update_neighbor(pck)
             if pck['type'] == 'JOIN_REPLY':  # it becomes registered and sends join ack if the message is sent to itself once received join reply
                 if pck['dest_gui'] == self.id:
+                    # log broadcast-to-me arrival delay (JOIN_REPLY)
+                    log_packet_delivery(pck, self)
                     self.addr = pck['addr']
                     self.parent_gui = pck['gui']
                     self.root_addr = pck['root_addr']
                     self.hop_count = pck['hop_count']
                     self.draw_parent()
+                    # join completion time
+                    try:
+                        if getattr(self, '_join_started_at', None) is not None and getattr(self, '_join_completed_at', None) is None:
+                            self._join_completed_at = self.now
+                            write_join_time(self)
+                            try:
+                                delay = self._join_completed_at - self._join_started_at
+                                self._dbg(f"JOIN_TIME started={self._join_started_at:.3f} completed={self._join_completed_at:.3f} delay={delay:.3f}")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     self.kill_timer('TIMER_JOIN_REQUEST')
                     self.send_heart_beat()
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
@@ -646,6 +763,9 @@ class SensorNode(wsn.Node):
             self.send_heart_beat()
             self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
             #print(self.id)
+ 
+        elif name == 'TIMER_TX_SEND':
+            self._tx_drain_due()
 
         elif name == 'TIMER_JOIN_REQUEST':  # if it has not received heart beat messages before, it sets timer again and wait heart beat messages once join request timer fired.
             if len(self.candidate_parents_table) == 0:
@@ -654,7 +774,7 @@ class SensorNode(wsn.Node):
                 self.select_and_join()
 
         elif name == 'TIMER_SENSOR':
-            self.route_and_forward_package({'dest': self.root_addr, 'type': 'SENSOR', 'source': self.addr, 'sensor_value': random.uniform(10,50)})
+            self.route_and_forward_package({'dest': self.root_addr, 'type': 'SENSOR', 'source': self.addr, 'sensor_value': random.uniform(10,50), 'created_at': self.now})
             timer_duration =  self.id % 20
             if timer_duration == 0: timer_duration = 1
             self.set_timer('TIMER_SENSOR', timer_duration)
@@ -885,6 +1005,75 @@ def write_multihop_neighbors_csv(path="multihop_neighbors.csv"):
                 ])
 
 
+def log_packet_delivery(pck, receiver_node, path="packet_delays.csv"):
+    """Log end-to-end delivery delay for directed or broadcast-to-specific-GUI packets."""
+    try:
+        created = pck.get('created_at', None)
+        delivered = getattr(receiver_node, 'now', None)
+        delay = ''
+        if isinstance(created, (int, float)) and isinstance(delivered, (int, float)):
+            delay = f"{delivered - created:.6f}"
+
+        # Resolve an effective destination:
+        # - If broadcast JOIN_REPLY has dest_gui == me, treat my addr as effective destination.
+        effective_dest = pck.get('dest')
+        if (effective_dest == wsn.BROADCAST_ADDR) and (pck.get('dest_gui') == receiver_node.id):
+            effective_dest = receiver_node.addr or receiver_node.ch_addr
+
+        # Helpers to resolve GUI from an Addr
+        def _gui_for_addr(addr):
+            if addr is None:
+                return ''
+            for n in receiver_node.sim.nodes:
+                if (getattr(n, 'addr', None) == addr) or (getattr(n, 'ch_addr', None) == addr):
+                    return n.id
+            return ''
+
+        with open(path, 'a', newline='') as f:
+            w = csv.writer(f)
+            if f.tell() == 0:
+                w.writerow(["ptype", "src", "src_gui", "dest", "dest_gui", "created_at", "delivered_at", "delay"])
+            w.writerow([
+                pck.get('type', ''),
+                _addr_str(pck.get('source')),
+                _gui_for_addr(pck.get('source')),
+                _addr_str(effective_dest),
+                _gui_for_addr(effective_dest),
+                f"{created:.6f}" if isinstance(created, (int, float)) else created,
+                f"{delivered:.6f}" if isinstance(delivered, (int, float)) else delivered,
+                delay,
+            ])
+        # optional debug line
+        try:
+            if getattr(receiver_node, 'debug_enabled', False):
+                with open(getattr(receiver_node, 'debug_log_path', 'wsn_debug.log'), 'a') as df:
+                    df.write(f"[{receiver_node.now:10.5f}] N{receiver_node.id} DELIVER_DELAY type={pck.get('type')} src={_addr_str(pck.get('source'))} dest={_addr_str(effective_dest)} delay={delay or ''}\n")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def write_join_time(node, path="join_times.csv"):
+    """Append this node's join duration and update ROUTE_STATS for averaging."""
+    try:
+        started = getattr(node, '_join_started_at', None)
+        completed = getattr(node, '_join_completed_at', None)
+        if not isinstance(started, (int, float)) or not isinstance(completed, (int, float)):
+            return
+        delay = completed - started
+        with open(path, 'a', newline='') as f:
+            w = csv.writer(f)
+            if f.tell() == 0:
+                w.writerow(["node_id", "started_at", "completed_at", "join_delay"])
+            w.writerow([node.id, f"{started:.6f}", f"{completed:.6f}", f"{delay:.6f}"])
+        # aggregate
+        ROUTE_STATS['join_count'] += 1
+        ROUTE_STATS['join_total'] = ROUTE_STATS.get('join_total', 0.0) + delay
+    except Exception:
+        pass
+
+
 def write_topology_csv(path="topology.csv"):
     """Easy-to-read final topology snapshot for grading/inspection."""
     with open(path, "w", newline="") as f:
@@ -931,8 +1120,14 @@ def write_run_summary(path="run_summary.csv"):
         w.writerow(["tree_same_net", tree_same])
         w.writerow(["tree_child", tree_child])
         w.writerow(["tree_total", tree_total])
+        # average join
+        jn = ROUTE_STATS.get('join_count', 0)
+        jt = ROUTE_STATS.get('join_total', 0.0)
+        avg_join = (jt / jn) if jn > 0 else 0.0
+        w.writerow(["join_count", jn])
+        w.writerow(["avg_join_time", f"{avg_join:.6f}"])
         w.writerow(["fingerprint", fp])
-    print(f"[summary] routes rows={rows} direct={direct} mesh={mesh} tree={tree_total} fp={fp}")
+    print(f"[summary] routes rows={rows} direct={direct} mesh={mesh} tree={tree_total} joins={jn} avg_join={avg_join:.4f} fp={fp}")
 
 
 ###########################################################
