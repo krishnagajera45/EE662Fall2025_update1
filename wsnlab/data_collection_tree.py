@@ -433,8 +433,8 @@ class SensorNode(wsn.Node):
 
         if pck.get('addr') is not None:
             if pck['gui'] not in self.child_networks_table.keys() or pck['addr'] not in self.members_table:
-                if pck['gui'] not in self.candidate_parents_table:
-                    self.candidate_parents_table.append(pck['gui'])
+            if pck['gui'] not in self.candidate_parents_table:
+                self.candidate_parents_table.append(pck['gui'])
         
         # Log node state after neighbor update
         log_node_state(self, from_node_id=pck.get('gui'))
@@ -563,12 +563,12 @@ class SensorNode(wsn.Node):
         # Step 1: Check if destination is myself or my cluster head
         if dest == self.addr or (self.ch_addr is not None and dest == self.ch_addr):
             # Destination is me - deliver directly
-            pck['next_hop'] = dest
+                    pck['next_hop'] = dest
             path_str = "LOCAL"
             next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
             log_packet_route(pck, self, next_hop_str, path_str)
             self.send(pck)
-            return
+                    return
 
         # Step 2: Mesh routing - check local_neighbor_map first
         neighbor_match = None
@@ -578,7 +578,7 @@ class SensorNode(wsn.Node):
             if (neighbor_addr is not None and neighbor_addr == dest) or \
                (neighbor_ch_addr is not None and neighbor_ch_addr == dest):
                 neighbor_match = neighbor_entry
-                break
+                    break
 
         if neighbor_match:
             # Found in local_neighbor_map - use mesh routing
@@ -594,7 +594,7 @@ class SensorNode(wsn.Node):
             next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
             log_packet_route(pck, self, next_hop_str, path_str)
             self.send(pck)
-            return
+                    return
 
         # Step 3: Check if destination is in members_table (same cluster)
         if dest in self.members_table:
@@ -618,8 +618,8 @@ class SensorNode(wsn.Node):
                 return
             
             # Check if destination is in child networks
-            for child_gui, child_networks in self.child_networks_table.items():
-                if dest.net_addr in child_networks:
+                for child_gui, child_networks in self.child_networks_table.items():
+                    if dest.net_addr in child_networks:
                     # Route to child cluster head
                     if child_gui in self.local_neighbor_map:
                         pck['next_hop'] = self.local_neighbor_map[child_gui].get('addr')
@@ -1064,7 +1064,7 @@ def log_packet_delivery(pck, receiver_node, path="packet_delays.csv"):
         delay = delivered_at - created_at
         
         # Get packet information
-        ptype = pck.get('type', '')
+            ptype = pck.get('type', '')
         src = pck.get('source', '')
         dest = pck.get('dest', '')
         src_gui = pck.get('gui', '')  # Source GUI if available
@@ -1232,7 +1232,7 @@ print(f"Logging to {log_filename}")
 sim = wsn.Simulator(
     duration=config.SIM_DURATION,
     timescale=config.SIM_TIME_SCALE,
-    visual=bool(config.VIS),
+    visual=config.SIM_VISUALIZATION,
     terrain_size=config.SIM_TERRAIN_SIZE,
     title=config.SIM_TITLE)
 
