@@ -564,7 +564,7 @@ def create_network(node_class, number_of_nodes=100):
 sim = wsn.Simulator(
     duration=config.SIM_DURATION,
     timescale=config.SIM_TIME_SCALE,
-    visual=config.SIM_VISUALIZATION,
+    visual=bool(config.VIS),
     terrain_size=config.SIM_TERRAIN_SIZE,
     title=config.SIM_TITLE)
 
