@@ -8,7 +8,7 @@ TOTAL_BITS = 16
 ## node properties
 NODE_TX_RANGE = 100  # transmission range of nodes
 NODE_ARRIVAL_MAX = 200  # max time to wake up
-NODE_LOSS_CHANCE = 0.0 #percentage points, i.e 10 = 10%
+NODE_LOSS_CHANCE = 0.05 #percentage points, i.e 10 = 10%
 
 
 ## simulation properties

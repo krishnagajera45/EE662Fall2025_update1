@@ -222,11 +222,28 @@ class Node:
            Returns:
 
         """
+        ptype = pck.get('type', 'UNKNOWN')
+        self.log(f"[DEBUG] SEND: type={ptype}, from={self.id}, dest={pck.get('dest')}, loss_chance={config.NODE_LOSS_CHANCE}")
+        
         for (dist, node) in self.neighbor_distance_list:
             if dist <= self.tx_range:
-                if node.can_receive(pck):
-                    prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 >0 else 0.00001
-                    self.delayed_exec(prop_time, node.on_receive_check, pck)
+                rand_val = random.random()
+                loss_check = rand_val > config.NODE_LOSS_CHANCE
+                self.log(f"[DEBUG] Neighbor {node.id}: dist={dist:.2f}, rand={rand_val:.4f}, loss_check={loss_check} (>{config.NODE_LOSS_CHANCE})")
+                
+                if loss_check:  # simulating loss of the packet
+                    if node.can_receive(pck):
+                        prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 >0 else 0.00001
+                        self.log(f"[DEBUG] Packet DELIVERED to node {node.id}, prop_time={prop_time:.6f}")
+                        self.delayed_exec(prop_time, node.on_receive_check, pck)
+                    else:
+                        self.log(f"[DEBUG] Packet REJECTED by node {node.id} (can_receive=False)")
+                else:
+                    if pck['type'] != "HEART_BEAT" and pck['type'] != "NEIGHBOR_INFO_BROADCAST":
+                        self.log("PACKET DROPPED")
+                        self.log(pck)
+                    else:
+                        self.log(f"[DEBUG] Packet DROPPED (loss) to node {node.id}, type={ptype} (silent drop)")
             else:
                 break
 
