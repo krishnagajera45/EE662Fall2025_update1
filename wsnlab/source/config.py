@@ -12,7 +12,7 @@ NODE_LOSS_CHANCE = 0.05 #percentage points, i.e 10 = 10%
 
 
 ## simulation properties
-SIM_NODE_COUNT = 12  # noce count in simulation
+SIM_NODE_COUNT = 99  # noce count in simulation
 SIM_NODE_PLACING_CELL_SIZE = 75  # cell size to place one node
 SIM_DURATION = 5000  # simulation Duration in seconds
 SIM_TIME_SCALE = 0.001  #  The real time dureation of 1 second simualtion time

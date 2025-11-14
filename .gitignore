@@ -148,3 +148,5 @@ wsn_debug.log
 *.csv
 clusterhead_distances.csv
 clusterhead_distances.csv
+Neighbor_Table_Analysis.md
+*.md

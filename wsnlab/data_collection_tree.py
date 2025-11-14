@@ -564,7 +564,7 @@ class SensorNode(wsn.Node):
         # Step 1: Check if destination is myself or my cluster head
         if dest == self.addr or (self.ch_addr is not None and dest == self.ch_addr):
             # Destination is me - deliver directly
-            pck['next_hop'] = dest
+            pck["next_hop"] = dest
             path_str = "LOCAL"
             next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
             log_packet_route(pck, self, next_hop_str, path_str)
@@ -1001,7 +1001,6 @@ class SensorNode(wsn.Node):
             self.broadcast_neighbor_info()
             self.set_timer('TIMER_NEIGHBOR_BROADCAST', config.NEIGHBOR_INFO_BROADCAST_INTERVAL)
         elif name == 'TIMER_SENSOR':
-            return #TEMP FIX
             self.send_sensor_data()
             self.set_timer('TIMER_SENSOR', config.DATA_INTERVAL)
         #elif name == 'TIMER_SENSOR':
