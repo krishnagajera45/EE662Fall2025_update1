@@ -141,6 +141,9 @@ class Node:
            Returns:
                Node: Created node object.
         """
+        self.power = 21600  # Joules (2 AA batteries: 3.0V * 2.0Ah * 3600 = 21600 J)
+        self.tx_power = config.NODE_DEFAULT_TX_POWER  # transmission power level (dBm)
+        self.tx_current = config.TX_CURRENTS[config.NODE_DEFAULT_TX_POWER]  # current consumption for TX (mA)
         self.pos = pos
         self.tx_range = 0
         self.sim = sim
@@ -227,6 +230,11 @@ class Node:
         
         for (dist, node) in self.neighbor_distance_list:
             if dist <= self.tx_range:
+                # Calculate and deduct energy consumption for TX
+                # Energy = (V * I * 8 * MTU / DATARATE) + overhead (10 µJ)
+                energy_tx = ((self.tx_current * config.VOLTAGE * 8 * config.MTU / config.DATARATE) + 0.01) / 1000  # Convert to Joules
+                self.power -= energy_tx
+                
                 rand_val = random.random()
                 loss_check = rand_val > config.NODE_LOSS_CHANCE
                 self.log(f"[DEBUG] Neighbor {node.id}: dist={dist:.2f}, rand={rand_val:.4f}, loss_check={loss_check} (>{config.NODE_LOSS_CHANCE})")
@@ -357,6 +365,10 @@ class Node:
 
         """
         if not self.is_sleep:
+            # Calculate and deduct energy consumption for RX
+            # Energy = (V * I * 8 * MTU / DATARATE) + overhead (10 µJ)
+            energy_rx = ((config.RX_CURRENT * config.VOLTAGE * 8 * config.MTU / config.DATARATE) + 0.01) / 1000  # Convert to Joules
+            self.power -= energy_rx
             self.delayed_exec(0.00001, self.on_receive, pck)
 
     ############################

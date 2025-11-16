@@ -122,8 +122,59 @@ ALL_NODES = []              # node objects
 CLUSTER_HEADS = []
 ROLE_COUNTS = Counter()     # live tally per Roles enum
 
+# --- failure and recovery tracking ---
+FAILED_NODES = set()  # Set of node IDs that are currently failed
+ORPHAN_NODES = set()  # Set of node IDs that are currently orphaned
+RECOVERY_EVENTS = []  # List of recovery events: [(node_id, failure_time, recovery_time, orphan_count)]
+ORPHAN_EVENTS = []  # List of orphan events: [(node_id, time, reason)]
+ROLE_CHANGE_EVENTS = []  # List of role change events: [(node_id, old_role, new_role, time)]
+
 def _addr_str(a): return "" if a is None else str(a)
 def _role_name(r): return r.name if hasattr(r, "name") else str(r)
+
+# --- Recovery logging functions ---
+def log_orphan_event(node_id, time, reason):
+    """Log orphan event.
+    
+    Args:
+        node_id (int): Node ID that became orphan
+        time (float): Simulation time when orphaned
+        reason (str): Reason for becoming orphan
+    """
+    ORPHAN_EVENTS.append({
+        'node_id': node_id,
+        'time': time,
+        'reason': reason
+    })
+    write_log(node_id, f"ORPHAN_EVENT reason={reason}", time)
+
+def log_join_network(node_id, time, join_type):
+    """Log network join event.
+    
+    Args:
+        node_id (int): Node ID that joined
+        time (float): Simulation time when joined
+        join_type (str): Type of join (initial_join, recovered_from_orphan, etc.)
+    """
+    write_log(node_id, f"JOIN_NETWORK type={join_type}", time)
+
+def log_role_change(node_id, old_role, new_role, time):
+    """Log role change event.
+    
+    Args:
+        node_id (int): Node ID that changed role
+        old_role (Roles): Previous role
+        new_role (Roles): New role
+        time (float): Simulation time when role changed
+    """
+    if old_role != new_role:
+        ROLE_CHANGE_EVENTS.append({
+            'node_id': node_id,
+            'old_role': _role_name(old_role),
+            'new_role': _role_name(new_role),
+            'time': time
+        })
+        write_log(node_id, f"ROLE_CHANGE from={_role_name(old_role)} to={_role_name(new_role)}", time)
 
 
 Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD')
@@ -347,6 +398,18 @@ class SensorNode(wsn.Node):
         self.members_table = []
         self.net_req_flag = None
         self.received_JR_guis = []  # keeps received Join Request global unique ids
+        # Address pool management for cluster size control
+        self.node_available_dict = {}  # Pool of child node IDs: {node_id: gui or None}
+        self.net_id_available_dict = {}  # Pool of cluster network IDs (ROOT only): {net_id: source or None}
+        # Transmission power management
+        self.tx_power = config.NODE_DEFAULT_TX_POWER  # Transmission power level (dBm), will be updated when joining cluster
+        self.tx_current = config.TX_CURRENTS[config.NODE_DEFAULT_TX_POWER]  # Current consumption for TX (mA)
+        # Failure and recovery tracking
+        self.is_failed = False  # Whether this node is currently failed
+        self.failure_time = None  # Time when node failed
+        self.recovery_time = None  # Time when node recovered
+        self.was_orphan = False  # Whether node was orphaned during failure
+        self.last_heartbeat_time = {}  # Track last heartbeat time from each neighbor
         ALL_NODES.append(self)
     ###################
     def run(self):
@@ -369,13 +432,75 @@ class SensorNode(wsn.Node):
         # Log JOIN_TIME
         write_log(self.id, f"JOIN_TIME started={self.wake_up_time:.3f} completed={self.registered_time:.3f} delay={diff:.3f}", self.now)
 
+    def assign_tx_power(self, power_level=None):
+        """Assign transmission power level to node.
+        
+        Args:
+            power_level (str): Power level in dBm (e.g., "0 dBm"). If None, uses smart selection.
+        """
+        if power_level is None:
+            # Smart power selection: choose minimum power needed to reach parent
+            if self.parent_gui is not None:
+                # Find parent details in candidate_parents_table
+                parent = next(
+                    (d for d in self.candidate_parents_table if isinstance(d, dict) and d.get('gui') == self.parent_gui),
+                    None
+                )
+                if parent and 'distance' in parent:
+                    parent_distance = parent['distance']
+                    self.log(f"[DEBUG TX_POWER] Node {self.id}: Smart power selection, parent distance={parent_distance:.2f}m")
+                    
+                    # Calculate distance differences for each power level
+                    dist_diff = []
+                    for power_lvl in config.TX_POWER_LEVELS:
+                        range_val = config.NODE_TX_RANGES[power_lvl]
+                        diff = parent_distance - range_val
+                        dist_diff.append(diff)
+                    
+                    # Find the index of the smallest *negative* distance difference (power that can reach)
+                    negative_diffs = [(i, d) for i, d in enumerate(dist_diff) if d < 0]
+                    
+                    if negative_diffs:
+                        # Choose the power level with the smallest negative diff (minimum power that reaches)
+                        dist_diff_idx, _ = max(negative_diffs, key=lambda x: x[1])
+                    else:
+                        # Fallback: pick the smallest absolute difference
+                        dist_diff_idx = min(range(len(dist_diff)), key=lambda i: abs(dist_diff[i]))
+                    
+                    power_level = config.TX_POWER_LEVELS[dist_diff_idx]
+                    self.log(f"[DEBUG TX_POWER] Node {self.id}: Selected {power_level} (range={config.NODE_TX_RANGES[power_level]}m) to reach parent at {parent_distance:.2f}m")
+                else:
+                    # No parent info available, use default
+                    power_level = config.NODE_DEFAULT_TX_POWER
+                    self.log(f"[DEBUG TX_POWER] Node {self.id}: No parent info, using default {power_level}")
+            else:
+                # No parent, use default
+                power_level = config.NODE_DEFAULT_TX_POWER
+                self.log(f"[DEBUG TX_POWER] Node {self.id}: No parent, using default {power_level}")
+        
+        # Assign power level
+        self.tx_power = power_level
+        self.tx_current = config.TX_CURRENTS[power_level]
+        self.tx_range = config.NODE_TX_RANGES[power_level] * config.SCALE
+        
+        # Update base class attributes
+        if hasattr(self, 'power'):
+            pass  # Already initialized in base class
+        
+        self.log(f"[DEBUG TX_POWER] Node {self.id}: Assigned tx_power={self.tx_power}, tx_current={self.tx_current}mA, tx_range={self.tx_range:.2f}m")
+        # Get role name safely (role may not be set during initialization)
+        role_name = _role_name(getattr(self, 'role', Roles.UNDISCOVERED))
+        write_log(self.id, f"TX_POWER_UPDATE role={role_name} power={self.tx_power} current={self.tx_current} range={self.tx_range:.2f}", self.now)
+
     def set_role(self, new_role, *, recolor=True):
         """Central place to switch roles, keep tallies, and (optionally) recolor."""
         old_role = getattr(self, "role", None)
-        if old_role is not None:
+        if old_role is not None and old_role != new_role:
             ROLE_COUNTS[old_role] -= 1
             if ROLE_COUNTS[old_role] <= 0:
                 ROLE_COUNTS.pop(old_role, None)
+            # Log role change
+            log_role_change(self.id, old_role, new_role, self.now)
         ROLE_COUNTS[new_role] += 1
         self.role = new_role
 
@@ -388,6 +513,9 @@ class SensorNode(wsn.Node):
                 self.scene.nodecolor(self.id, 0, 1, 0)
             elif new_role == Roles.CLUSTER_HEAD:
                 self.scene.nodecolor(self.id, 0, 0, 1)
+                # Assign power: smart selection if enabled, else keep current (from NETWORK_REPLY)
+                if config.ALLOW_TX_POWER_CHOICE and self.tx_power == config.NODE_DEFAULT_TX_POWER:
+                    self.assign_tx_power()  # Smart selection
                 self.draw_tx_range()
             elif new_role == Roles.ROOT:
                 self.scene.nodecolor(self.id, 0, 0, 0)
@@ -421,7 +549,213 @@ class SensorNode(wsn.Node):
         self.set_timer('TIMER_JOIN_REQUEST', 20)
 
     ###################
+    def check_neighbors(self):
+        """Checks neighbors if they are still alive or not. If not, updates necessary tables.
+        Detects parent failure and triggers recovery.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        if self.is_failed:
+            return  # Don't check neighbors if this node is failed
+        
+        timeout_threshold = config.HEART_BEAT_TIME_INTERVAL * config.NEIGHBOR_TIMEOUT_MULTIPLIER
+        childs_updated = False
+        parent_dead = False
+        will_be_removed = []
+        
+        for gui, pck in self.local_neighbor_map.items():
+            last_hb_time = self.last_heartbeat_time.get(gui, pck.get('arrival_time', 0))
+            if self.now - last_hb_time > timeout_threshold:
+                # Neighbor is dead or failed
+                will_be_removed.append(gui)
+                if gui == self.parent_gui:
+                    parent_dead = True
+                    self.log(f"[RECOVERY] Node {self.id}: Parent {gui} appears dead (no heartbeat for {self.now - last_hb_time:.2f}s)")
+                if gui in self.child_networks_table.keys():
+                    del self.child_networks_table[gui]
+                    childs_updated = True
+                # Remove from candidate_parents_table
+                self.candidate_parents_table = [c for c in self.candidate_parents_table 
+                                                if (isinstance(c, dict) and c.get('gui') != gui) or c != gui]
+        
+        # Remove dead neighbors
+        for gui in will_be_removed:
+            if gui in self.local_neighbor_map:
+                del self.local_neighbor_map[gui]
+            if gui in self.last_heartbeat_time:
+                del self.last_heartbeat_time[gui]
+        
+        # Handle parent failure
+        if self.role != Roles.UNREGISTERED and self.role != Roles.UNDISCOVERED:
+            if parent_dead:
+                self.log(f"[RECOVERY] Node {self.id}: Starting recovery due to parent failure")
+                log_orphan_event(self.id, self.now, f"parent_timeout:{self.parent_gui}")
+                ORPHAN_NODES.add(self.id)
+                self.was_orphan = True
+                self.repair()
+            elif childs_updated:
+                if self.role != Roles.ROOT:
+                    self.send_network_update()
+
+    ###################
+    def repair(self):
+        """Executes chosen repairing instructions.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        if self.role == Roles.REGISTERED:
+            self.log(f"[RECOVERY] Node {self.id}: Repairing as REGISTERED node")
+            self.become_unregistered()
+        elif self.role == Roles.CLUSTER_HEAD:
+            if config.REPAIRING_METHOD == 'ALL_ORPHAN':
+                self.log(f"[RECOVERY] Node {self.id}: Repairing with ALL_ORPHAN method")
+                self.repair_all_orphan()
+            elif config.REPAIRING_METHOD == 'FIND_ANOTHER_PARENT':
+                self.log(f"[RECOVERY] Node {self.id}: Repairing with FIND_ANOTHER_PARENT method")
+                self.repair_find_another_parent()
+    
+    ###################
+    def repair_all_orphan(self):
+        """Becomes unregistered and sends I am orphan message.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        self.send_i_am_orphan()
+        self.become_unregistered()
+    
+    ###################
+    def repair_find_another_parent(self):
+        """If it has potential parent in its table, tries to connect any of them. Otherwise becomes unregistered.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        # Remove dead parent from candidate_parents_table
+        if self.parent_gui is not None:
+            self.candidate_parents_table = [c for c in self.candidate_parents_table 
+                                            if (isinstance(c, dict) and c.get('gui') != self.parent_gui) or c != self.parent_gui]
+            if self.parent_gui in self.local_neighbor_map:
+                del self.local_neighbor_map[self.parent_gui]
+        
+        if len(self.candidate_parents_table) > 0:
+            self.kill_all_timers()
+            self.erase_parent()
+            self.set_role(Roles.UNREGISTERED)
+            self.select_and_join()
+        else:
+            self.log(f"[RECOVERY] Node {self.id}: No alternative parent found, becoming unregistered")
+            self.become_unregistered()
+    
+    ###################
+    def send_i_am_orphan(self):
+        """Sends i am orphan message to inform its neighbors.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        pck = {'dest': wsn.BROADCAST_ADDR,
+               'type': 'I_AM_ORPHAN',
+               'source': self.ch_addr if self.ch_addr is not None else self.addr,
+               'gui': self.id,
+               'created_at': self.now}
+        write_log(self.id, f"PKT_CREATE type=I_AM_ORPHAN created_at={self.now:.3f}", self.now)
+        self.send(pck)
+
+    ###################
+    def fail_node(self):
+        """Fail this node - put it to sleep and mark as failed.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        if self.is_failed:
+            return  # Already failed
+        
+        self.is_failed = True
+        self.failure_time = self.now
+        FAILED_NODES.add(self.id)
+        self.sleep()
+        self.kill_all_timers()
+        self.scene.nodecolor(self.id, 1, 1, 1)  # White color for failed node
+        self.log(f"[FAILURE] Node {self.id}: FAILED at time {self.now:.3f}")
+        write_log(self.id, f"NODE_FAILURE time={self.now:.3f}", self.now)
+        
+        # Check if any nodes will become orphan due to this failure
+        self.check_orphan_children()
+    
+    ###################
+    def recover_node(self):
+        """Recover this node - wake it up and restart registration process.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        if not self.is_failed:
+            return  # Not failed
+        
+        self.is_failed = False
+        self.recovery_time = self.now
+        recovery_duration = self.recovery_time - self.failure_time
+        FAILED_NODES.discard(self.id)
+        
+        # Count orphan nodes at recovery time
+        orphan_count = len(ORPHAN_NODES)
+        
+        self.wake_up()
+        self.scene.nodecolor(self.id, 1, 0, 0)  # Red color for recovering node
+        self.log(f"[RECOVERY] Node {self.id}: RECOVERED at time {self.now:.3f} (was failed for {recovery_duration:.3f}s)")
+        write_log(self.id, f"NODE_RECOVERY time={self.now:.3f} failure_duration={recovery_duration:.3f} orphan_count={orphan_count}", self.now)
+        
+        # Log recovery event
+        RECOVERY_EVENTS.append({
+            'node_id': self.id,
+            'failure_time': self.failure_time,
+            'recovery_time': self.recovery_time,
+            'recovery_duration': recovery_duration,
+            'orphan_count': orphan_count
+        })
+        
+        # Restart registration process
+        if self.role == Roles.ROOT:
+            # ROOT should not fail, but if it does, restart as ROOT
+            self.set_role(Roles.ROOT)
+            self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
+        else:
+            # Become unregistered and try to rejoin
+            self.become_unregistered()
+    
+    ###################
+    def check_orphan_children(self):
+        """Check if any child nodes will become orphan due to this node's failure.
+        
+        Args:
+        
+        Returns:
+        
+        """
+        # This will be detected by children when they check_neighbors() and find parent timeout
+        pass
+
+    ###################
     def update_neighbor(self, pck):
+        pck = pck.copy()
         pck['arrival_time'] = self.now
         # compute Euclidean distance between self and neighbor
         if pck['gui'] in NODE_POS and self.id in NODE_POS:
@@ -430,11 +764,25 @@ class SensorNode(wsn.Node):
             pck['distance'] = math.hypot(x1 - x2, y1 - y2)
         pck['mesh_hop_distance'] = 1
         self.local_neighbor_map[pck['gui']] = pck
+        # Update last heartbeat time for failure detection
+        self.last_heartbeat_time[pck['gui']] = self.now
 
         if pck.get('addr') is not None:
             if pck['gui'] not in self.child_networks_table.keys() or pck['addr'] not in self.members_table:
-                if pck["gui"] not in self.candidate_parents_table:
-                    self.candidate_parents_table.append(pck["gui"])
+                # Store full packet info in candidate_parents_table for distance-based power selection
+                # Check if this GUI is already in candidate_parents_table
+                gui_exists = False
+                for candidate in self.candidate_parents_table:
+                    if isinstance(candidate, dict):
+                        if candidate.get('gui') == pck['gui']:
+                            gui_exists = True
+                            break
+                    elif candidate == pck['gui']:
+                        gui_exists = True
+                        break
+                
+                if not gui_exists:
+                    self.candidate_parents_table.append(pck.copy())
         
         # Log node state after neighbor update
         log_node_state(self, from_node_id=pck.get('gui'))
@@ -443,13 +791,41 @@ class SensorNode(wsn.Node):
     def select_and_join(self):
         min_hop = 99999
         min_hop_gui = 99999
-        for gui in self.candidate_parents_table:
-            if self.local_neighbor_map[gui]['hop_count'] < min_hop or (self.local_neighbor_map[gui]['hop_count'] == min_hop and gui < min_hop_gui):
-                min_hop = self.local_neighbor_map[gui]['hop_count']
+        for candidate in self.candidate_parents_table:
+            # Handle both dict (new format) and int (old format) for backward compatibility
+            if isinstance(candidate, dict):
+                gui = candidate.get('gui')
+                if gui is None:
+                    continue
+            else:
+                gui = candidate
+            
+            if gui in self.local_neighbor_map:
+                hop_count = self.local_neighbor_map[gui].get('hop_count', 99999)
+                if hop_count < min_hop or (hop_count == min_hop and gui < min_hop_gui):
+                    min_hop = hop_count
                 min_hop_gui = gui
-        selected_addr = self.local_neighbor_map[min_hop_gui]['source']
-        self.send_join_request(selected_addr)
-        self.set_timer('TIMER_JOIN_REQUEST', config.JOIN_REQUEST_TIME_INTERVAL)
+        
+        if min_hop_gui != 99999:
+            # Get address from local_neighbor_map or candidate_parents_table
+            selected_addr = None
+            if min_hop_gui in self.local_neighbor_map:
+                selected_addr = self.local_neighbor_map[min_hop_gui].get('addr') or self.local_neighbor_map[min_hop_gui].get('source')
+            else:
+                # Try to get from candidate_parents_table
+                for candidate in self.candidate_parents_table:
+                    if isinstance(candidate, dict) and candidate.get('gui') == min_hop_gui:
+                        selected_addr = candidate.get('addr') or candidate.get('source')
+                        break
+                    elif candidate == min_hop_gui:
+                        # Old format, need to get from local_neighbor_map
+                        if min_hop_gui in self.local_neighbor_map:
+                            selected_addr = self.local_neighbor_map[min_hop_gui].get('addr') or self.local_neighbor_map[min_hop_gui].get('source')
+                        break
+            
+            if selected_addr is not None:
+                self.send_join_request(selected_addr)
+                self.set_timer('TIMER_JOIN_REQUEST', config.JOIN_REQUEST_TIME_INTERVAL)
 
 
     ###################
@@ -526,9 +902,11 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # Include cluster tx_power in JOIN_REPLY (always include, even in UNIFORM mode)
         pck = {'dest': wsn.BROADCAST_ADDR, 'type': 'JOIN_REPLY', 'source': self.ch_addr,
                    'gui': self.id, 'dest_gui': gui, 'addr': addr, 'root_addr': self.root_addr,
-                   'hop_count': self.hop_count+1, 'created_at': self.now}
+                   'hop_count': self.hop_count+1, 'tx_power': self.tx_power, 'created_at': self.now}
+        self.log(f"[DEBUG TX_POWER] CLUSTER_HEAD Node {self.id}: Sending JOIN_REPLY to node {gui} with tx_power={self.tx_power}")
         write_log(self.id, f"PKT_CREATE type=JOIN_REPLY created_at={self.now:.3f}", self.now)
         self.send(pck)
 
@@ -682,7 +1060,18 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
-        pck = {'dest': dest, 'type': 'NETWORK_REPLY', 'source': self.addr, 'addr': addr, 'created_at': self.now}
+        # Assign cluster tx_power based on mode
+        if config.TX_POWER_MODE == 'PER_CLUSTER':
+            # Assign random power level from available levels for this cluster
+            tx_power = random.choice(config.TX_POWER_LEVELS)
+            self.log(f"[DEBUG TX_POWER] ROOT Node {self.id}: Assigned cluster tx_power={tx_power} to cluster {addr} (range={config.NODE_TX_RANGES[tx_power]}m)")
+            write_log(self.id, f"TX_POWER_ASSIGN cluster={addr} power={tx_power} range={config.NODE_TX_RANGES[tx_power]}", self.now)
+        else:
+            # UNIFORM mode - use default power
+            tx_power = config.NODE_DEFAULT_TX_POWER
+            self.log(f"[DEBUG TX_POWER] ROOT Node {self.id}: UNIFORM mode - using {tx_power} (range={config.NODE_TX_RANGES[tx_power]}m) for cluster {addr}")
+        
+        pck = {'dest': dest, 'type': 'NETWORK_REPLY', 'source': self.addr, 'addr': addr, 'tx_power': tx_power, 'created_at': self.now}
         write_log(self.id, f"PKT_CREATE type=NETWORK_REPLY created_at={self.now:.3f}", self.now)
         self.route_and_forward_package(pck)
 
@@ -801,37 +1190,64 @@ class SensorNode(wsn.Node):
                 # yield self.timeout(.5)
                 self.send_heart_beat()
             if pck['type'] == 'JOIN_REQUEST':  # it waits and sends join reply message once received join request
-                # yield self.timeout(.5)
+                # DEBUG: Check address pool before assignment
+                self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: Received JOIN_REQUEST from node {pck['gui']}")
+                self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: Current pool status - total={len(self.node_available_dict)}, used={sum(1 for v in self.node_available_dict.values() if v is not None)}, available={sum(1 for v in self.node_available_dict.values() if v is None)}")
+                
+                # Search for available address in pool
                 avail_node_id = None
                 for node_id, avail in self.node_available_dict.items():
                     if avail is None or avail == pck['gui']:
                         avail_node_id = node_id
                         break
+                
                 if avail_node_id is not None and self.ch_addr is not None:
-                    self.node_available_dict[avail_node_id] = pck['gui'] #this network is now being used
-                    self.send_join_reply(pck['gui'], wsn.Addr(self.ch_addr.net_addr, avail_node_id))
-                # else: cluster is full, no reply sent (node will retry or choose another parent)
+                    # Address available - assign it
+                    self.node_available_dict[avail_node_id] = pck['gui']  # Mark as used
+                    assigned_addr = wsn.Addr(self.ch_addr.net_addr, avail_node_id)
+                    self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: ASSIGNED address {assigned_addr} to node {pck['gui']} (node_id={avail_node_id})")
+                    self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: Pool after assignment - used={sum(1 for v in self.node_available_dict.values() if v is not None)}/{len(self.node_available_dict)}")
+                    self.send_join_reply(pck['gui'], assigned_addr)
+                else:
+                    # Cluster is full - no address available
+                    self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: CLUSTER FULL! Cannot assign address to node {pck['gui']}")
+                    self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: All addresses used - no JOIN_REPLY sent (node will retry or choose another parent)")
+                    # No reply sent - node will retry or choose another parent
             if pck['type'] == 'NETWORK_REQUEST':  # it sends a network reply to requested node
                 # yield self.timeout(.5)
                 if self.role == Roles.ROOT:
+                    # DEBUG: Check cluster network ID pool
+                    self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: Received NETWORK_REQUEST from {pck['source']}")
+                    self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: Current net_id pool - total={len(self.net_id_available_dict)}, used={sum(1 for v in self.net_id_available_dict.values() if v is not None)}, available={sum(1 for v in self.net_id_available_dict.values() if v is None)}")
+                    
+                    # Search for available network ID
                     avail_net_id = None
                     for net_id, avail in self.net_id_available_dict.items():
                         if avail is None or avail == pck['source']:
                             avail_net_id = net_id
                             break
-                    if avail_net_id is None:
-                        print("BUG")
-                        print(self.net_id_available_dict)
-                        self.log(pck)
-                    new_addr = wsn.Addr(avail_net_id,254)
-                    self.net_id_available_dict[avail_net_id] = pck['source'] #this network is now being used
-                    self.send_network_reply(pck['source'],new_addr)
+                    
+                    if avail_net_id is not None:
+                        # Assign network ID
+                        self.net_id_available_dict[avail_net_id] = pck['source']  # Mark as used
+                        new_addr = wsn.Addr(avail_net_id, 254)
+                        self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: ASSIGNED cluster network ID {avail_net_id} to {pck['source']} (address={new_addr})")
+                        self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: net_id pool after assignment - used={sum(1 for v in self.net_id_available_dict.values() if v is not None)}/{len(self.net_id_available_dict)}")
+                        self.send_network_reply(pck['source'], new_addr)
+                    else:
+                        self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: ERROR - No available cluster network IDs! All {len(self.net_id_available_dict)} clusters are in use")
+                        # Still send reply but log error
+                        new_addr = wsn.Addr(pck['source'].node_addr, 254)
+                        self.send_network_reply(pck['source'], new_addr)
             if pck['type'] == 'JOIN_ACK':
                 self.members_table.append(pck['source'])
             if pck['type'] == 'NETWORK_UPDATE':
                 self.child_networks_table[pck['gui']] = pck['child_networks']
                 if self.role != Roles.ROOT:
                     self.send_network_update()
+            if pck['type'] == 'I_AM_ORPHAN':  # if the sender is parent, starts repairing procedure
+                # ROOT doesn't have a parent, so just log the orphan event
+                self.log(f"[RECOVERY] ROOT Node {self.id}: Received I_AM_ORPHAN from node {pck.get('gui')}")
             if pck['type'] == 'NEIGHBOR_INFO_BROADCAST':
                 # Process shared neighbor information: add discovered neighbors with incremented hop distance
                 if self.role != Roles.ROOT:
@@ -865,6 +1281,11 @@ class SensorNode(wsn.Node):
                 self.received_JR_guis.append(pck['gui'])
                 # yield self.timeout(.5)
                 self.send_network_request() #this is getting spammed
+            if pck['type'] == 'I_AM_ORPHAN':  # if the sender is parent, starts repairing procedure
+                # Check if sender is our parent
+                if self.parent_gui is not None and pck.get('gui') == self.parent_gui:
+                    self.log(f"[RECOVERY] Node {self.id}: Received I_AM_ORPHAN from parent {self.parent_gui}, starting repair")
+                    self.repair()
             if pck['type'] == 'NEIGHBOR_INFO_BROADCAST':
                 # Process shared neighbor information: add discovered neighbors with incremented hop distance
                 for neighbor_id, neighbor_packet in pck['neighbors'].items():
@@ -881,7 +1302,11 @@ class SensorNode(wsn.Node):
                         if neighbor_entry['mesh_hop_distance'] > config.MAX_MESH_DISCOVERY_HOPS + 1:
                             raise Exception("Something went wrong")
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
+                old_role = self.role
                 self.set_role(Roles.CLUSTER_HEAD)
+                # Log role change to CLUSTER_HEAD (already logged in set_role, but add context)
+                if old_role != Roles.CLUSTER_HEAD:
+                    self.log(f"[RECOVERY] Node {self.id}: Became CLUSTER_HEAD at {self.now:.3f}")
                 check_all_nodes_registered()
                 try:
                     write_clusterhead_distances_csv("clusterhead_distances.csv")
@@ -889,22 +1314,42 @@ class SensorNode(wsn.Node):
                     self.log(f"CH CSV export error: {e}")
                 self.scene.nodecolor(self.id, 0, 0, 1)
                 self.ch_addr = pck['addr']
+                
+                # Set cluster tx_power from NETWORK_REPLY
+                if 'tx_power' in pck:
+                    self.assign_tx_power(pck['tx_power'])
+                else:
+                    # Fallback to default if not provided
+                    self.assign_tx_power(config.NODE_DEFAULT_TX_POWER)
+                
+                # Initialize address pool for new CLUSTER_HEAD
+                self.node_available_dict = {i: None for i in range(1, config.NUM_OF_CHILDREN+1)}
+                self.log(f"[DEBUG CLUSTER_SIZE] NEW CLUSTER_HEAD Node {self.id}: Initialized address pool - NUM_OF_CHILDREN={config.NUM_OF_CHILDREN}, pool_size={len(self.node_available_dict)}")
+                self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: Cluster address={self.ch_addr}, can accept up to {config.NUM_OF_CHILDREN} child nodes")
                 self.send_network_update()
-                self.node_available_dict = {i: None for i in range(1, config.NUM_OF_CHILDREN+1)} #what we will need to add for this to be stable is the reopening of a lost network, but we get there when we get there
-
-                # yield self.timeout(.5)
                 self.send_heart_beat()
+                # Set up neighbor checking timer
+                self.set_timer('TIMER_CHECK_NEIGHBORS', config.HEART_BEAT_TIME_INTERVAL * 2)
+                # Process pending join requests
+                self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: Processing {len(self.received_JR_guis)} pending join requests")
                 for gui in self.received_JR_guis:
                     # yield self.timeout(random.uniform(.1,.5))
+                    # Search for available address
                     avail_node_id = None
                     for node_id, avail in self.node_available_dict.items():
                         if avail is None or avail == gui:
                             avail_node_id = node_id
                             break
+                    
                     if avail_node_id is not None:
-                        self.node_available_dict[avail_node_id] = gui#this network is now being used
-                        self.send_join_reply(gui, wsn.Addr(self.ch_addr.net_addr,avail_node_id))
-                    # else: cluster is full, skip this join request
+                        self.node_available_dict[avail_node_id] = gui  # Mark as used
+                        assigned_addr = wsn.Addr(self.ch_addr.net_addr, avail_node_id)
+                        self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: ASSIGNED address {assigned_addr} to pending node {gui} (node_id={avail_node_id})")
+                        self.send_join_reply(gui, assigned_addr)
+                    else:
+                        self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: WARNING - No address available for pending node {gui} (should not happen on initialization)")
+                        # Still send reply with GUI as node_id (fallback)
+                        self.send_join_reply(gui, wsn.Addr(self.ch_addr.net_addr, gui))
 
         elif self.role == Roles.UNDISCOVERED:  # if the node is undiscovered
             if pck['type'] == 'HEART_BEAT':  # it kills probe timer, becomes unregistered and sets join request timer once received heart beat
@@ -921,10 +1366,23 @@ class SensorNode(wsn.Node):
                     self.parent_gui = pck['gui']
                     self.root_addr = pck['root_addr']
                     self.hop_count = pck['hop_count']
+                    
+                    # Set cluster tx_power from JOIN_REPLY
+                    if 'tx_power' in pck:
+                        self.assign_tx_power(pck['tx_power'])
+                    else:
+                        # Fallback: use smart selection if enabled, else default
+                        if config.ALLOW_TX_POWER_CHOICE:
+                            self.assign_tx_power()  # Smart selection based on distance to parent
+                        else:
+                            self.assign_tx_power(config.NODE_DEFAULT_TX_POWER)
+                    
                     self.draw_parent()
                     self.kill_timer('TIMER_JOIN_REQUEST')
                     self.send_heart_beat()
                     self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
+                    # Set up neighbor checking timer
+                    self.set_timer('TIMER_CHECK_NEIGHBORS', config.HEART_BEAT_TIME_INTERVAL * 2)
                     self.set_timer('TIMER_SENSOR', config.DATA_INTERVAL)
                     self.send_join_ack(pck['source'])
                     if self.ch_addr is not None: # it could be a cluster head which lost its parent
@@ -937,6 +1395,14 @@ class SensorNode(wsn.Node):
                         #check if all nodes are registered
                         
                         self.set_timer('TIMER_NEIGHBOR_BROADCAST', config.NEIGHBOR_INFO_BROADCAST_INTERVAL)
+                        # Log joining network event
+                        if self.was_orphan:
+                            log_join_network(self.id, self.now, "recovered_from_orphan")
+                            if self.id in ORPHAN_NODES:
+                                ORPHAN_NODES.remove(self.id)
+                            self.was_orphan = False
+                        else:
+                            log_join_network(self.id, self.now, "initial_join")
 
                     # # sensor implementation
                     # timer_duration =  self.id % 20
@@ -973,18 +1439,29 @@ class SensorNode(wsn.Node):
                     self.ch_addr = wsn.Addr(0, 254)
                     self.root_addr = self.addr
                     self.hop_count = 0
-                    self.net_id_available_dict = {i: None for i in range(1, config.NUM_OF_CLUSTERS)} #what we will need to add for this to be stable is the reopening of a lost network, but we get there when we get there
-                    self.node_available_dict = {i: None for i in range(1, config.NUM_OF_CHILDREN+1)} #what we will need to add for this to be stable is the reopening of a lost network, but we get there when we get there
+                    # Set ROOT tx_power (always use default/max power)
+                    self.assign_tx_power(config.NODE_DEFAULT_TX_POWER)
+                    
+                    # Initialize address pools for ROOT
+                    self.net_id_available_dict = {i: None for i in range(1, config.NUM_OF_CLUSTERS+1)}
+                    self.node_available_dict = {i: None for i in range(1, config.NUM_OF_CHILDREN+1)}
+                    self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: Initialized address pools - NUM_OF_CLUSTERS={config.NUM_OF_CLUSTERS}, NUM_OF_CHILDREN={config.NUM_OF_CHILDREN}")
+                    self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: node_available_dict size={len(self.node_available_dict)}, available={sum(1 for v in self.node_available_dict.values() if v is None)}")
+                    self.log(f"[DEBUG CLUSTER_SIZE] ROOT Node {self.id}: net_id_available_dict size={len(self.net_id_available_dict)}, available={sum(1 for v in self.net_id_available_dict.values() if v is None)}")
 
                     self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
+                    # Set up neighbor checking timer
+                    self.set_timer('TIMER_CHECK_NEIGHBORS', config.HEART_BEAT_TIME_INTERVAL * 2)
                 else:  # otherwise it keeps trying to sending probe after a long time
                     self.c_probe = 0
                     self.set_timer('TIMER_PROBE', 30)
 
         elif name == 'TIMER_HEART_BEAT':  # it sends heart beat message once heart beat timer fired
-            self.send_heart_beat()
-            self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
-            #print(self.id)
+            if not self.is_failed:  # Only send heartbeat if node is not failed
+                self.send_heart_beat()
+                self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
+            # Check for dead neighbors and handle failures
+            self.check_neighbors()
         #elif name == "NET_REQ_TIMEOUT": #check if we are a clusterhead yet, if we are, cancel timer, else, resend
         #    self.log("TIMEOUT")
         #    if self.role == Roles.CLUSTER_HEAD or self.role == Roles.ROOT:
@@ -994,9 +1471,22 @@ class SensorNode(wsn.Node):
         #        self.set_timer("NET_REQ_TIMEOUT", config.SLEEP_MODE_PROBE_TIME_INTERVAL)
         elif name == 'TIMER_JOIN_REQUEST':  # if it has not received heart beat messages before, it sets timer again and wait heart beat messages once join request timer fired.
             if len(self.candidate_parents_table) == 0:
+                # Check if we're orphaned
+                if self.parent_gui is not None and self.parent_gui in FAILED_NODES:
+                    self.log(f"[RECOVERY] Node {self.id}: Detected orphan status (parent {self.parent_gui} failed)")
+                    log_orphan_event(self.id, self.now, f"parent_failed:{self.parent_gui}")
+                    ORPHAN_NODES.add(self.id)
+                    self.was_orphan = True
                 self.become_unregistered()
             else:  # otherwise it chose one of them and sends join request
                 self.select_and_join()
+        elif name == 'TIMER_CHECK_NEIGHBORS':  # Periodic check for dead neighbors
+            self.check_neighbors()
+            self.set_timer('TIMER_CHECK_NEIGHBORS', config.HEART_BEAT_TIME_INTERVAL * 2)
+        elif name == 'TIMER_NODE_FAILURE':  # Node failure event
+            self.fail_node()
+        elif name == 'TIMER_NODE_RECOVERY':  # Node recovery event
+            self.recover_node()
         elif name == 'TIMER_NEIGHBOR_BROADCAST':
             self.broadcast_neighbor_info()
             self.set_timer('TIMER_NEIGHBOR_BROADCAST', config.NEIGHBOR_INFO_BROADCAST_INTERVAL)
@@ -1218,7 +1708,9 @@ def create_network(node_class, number_of_nodes=100):
         py = 200 + config.SCALE* y * config.SIM_NODE_PLACING_CELL_SIZE + random.uniform(-1 * config.SIM_NODE_PLACING_CELL_SIZE / 3, config.SIM_NODE_PLACING_CELL_SIZE / 3)
         node = sim.add_node(node_class, (px, py))
         NODE_POS[node.id] = (px, py)   # <— add this line
-        node.tx_range = config.NODE_TX_RANGE * config.SCALE
+        # Set initial tx_range using default power level
+        node.assign_tx_power(config.NODE_DEFAULT_TX_POWER)
+        node.log(f"[DEBUG TX_POWER] Node {node.id}: Initialized with default tx_power={node.tx_power}, tx_range={node.tx_range:.2f}m")
         node.logging = True
         node.arrival = random.uniform(0, config.NODE_ARRIVAL_MAX)
         if node.id == ROOT_ID:
@@ -1242,11 +1734,130 @@ create_network(SensorNode, config.SIM_NODE_COUNT)
 write_node_distances_csv("node_distances.csv")
 write_node_distance_matrix_csv("node_distance_matrix.csv")
 
+# Initialize recovery tracking CSV files
+with open("recovery_events.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "failure_time", "recovery_time", "recovery_duration", "orphan_count_at_recovery"])
+
+with open("orphan_events.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "time", "reason"])
+
+with open("role_changes.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "old_role", "new_role", "time"])
+
+with open("join_network_events.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "time", "join_type"])
+
+# Schedule random node failures if enabled
+if config.ENABLE_NODE_FAILURE:
+    def schedule_node_failures():
+        """Schedule random node failures."""
+        if config.NUM_NODES_TO_FAIL > 0 and config.NUM_NODES_TO_FAIL < len(ALL_NODES):
+            # Select random nodes to fail (excluding ROOT)
+            nodes_to_fail = random.sample(
+                [n for n in ALL_NODES if n.id != ROOT_ID and not n.is_failed],
+                min(config.NUM_NODES_TO_FAIL, len([n for n in ALL_NODES if n.id != ROOT_ID]))
+            )
+            
+            for i, node in enumerate(nodes_to_fail):
+                failure_time = config.NODE_FAILURE_START_TIME + (i * config.NODE_FAILURE_INTERVAL)
+                recovery_time = failure_time + config.NODE_RECOVERY_TIME
+                
+                # Schedule failure
+                sim.delayed_exec(failure_time - sim.now, lambda n=node: n.fail_node())
+                
+                # Schedule recovery
+                sim.delayed_exec(recovery_time - sim.now, lambda n=node: n.recover_node())
+                
+                write_log(None, f"FAILURE_SCHEDULED node={node.id} failure_time={failure_time:.3f} recovery_time={recovery_time:.3f}", sim.now)
+                print(f"[FAILURE] Scheduled node {node.id} to fail at {failure_time:.3f} and recover at {recovery_time:.3f}")
+    
+    # Schedule failures after network is created
+    sim.delayed_exec(10, schedule_node_failures)
+
 # start the simulation
 sim.run()
 log_all_nodes_registered()
 calculate_and_log_average_join_time()
 calculate_and_log_average_packet_delay()
+
+# Write recovery statistics
+def write_recovery_statistics():
+    """Write recovery statistics to CSV files."""
+    # Write recovery events
+    with open("recovery_events.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        for event in RECOVERY_EVENTS:
+            writer.writerow([
+                event['node_id'],
+                f"{event['failure_time']:.6f}",
+                f"{event['recovery_time']:.6f}",
+                f"{event['recovery_duration']:.6f}",
+                event['orphan_count']
+            ])
+    
+    # Write orphan events
+    with open("orphan_events.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        for event in ORPHAN_EVENTS:
+            writer.writerow([
+                event['node_id'],
+                f"{event['time']:.6f}",
+                event['reason']
+            ])
+    
+    # Write role changes
+    with open("role_changes.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        for event in ROLE_CHANGE_EVENTS:
+            writer.writerow([
+                event['node_id'],
+                event['old_role'],
+                event['new_role'],
+                f"{event['time']:.6f}"
+            ])
+    
+    # Calculate and print recovery statistics
+    if RECOVERY_EVENTS:
+        recovery_durations = [e['recovery_duration'] for e in RECOVERY_EVENTS]
+        avg_recovery_time = sum(recovery_durations) / len(recovery_durations)
+        min_recovery_time = min(recovery_durations)
+        max_recovery_time = max(recovery_durations)
+        
+        print(f"\n{'='*60}")
+        print(f"📊 NETWORK RECOVERY STATISTICS")
+        print(f"{'='*60}")
+        print(f"Total recovery events: {len(RECOVERY_EVENTS)}")
+        print(f"Average recovery time: {avg_recovery_time:.6f} simulation time units")
+        print(f"Minimum recovery time: {min_recovery_time:.6f} simulation time units")
+        print(f"Maximum recovery time: {max_recovery_time:.6f} simulation time units")
+        print(f"Total orphan events: {len(ORPHAN_EVENTS)}")
+        print(f"Total role changes: {len(ROLE_CHANGE_EVENTS)}")
+        print(f"Current orphan nodes: {len(ORPHAN_NODES)}")
+        if ORPHAN_NODES:
+            print(f"Orphan node IDs: {sorted(ORPHAN_NODES)}")
+        print(f"{'='*60}\n")
+        
+        # Write summary
+        with open("recovery_summary.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["metric", "value"])
+            writer.writerow(["total_recovery_events", len(RECOVERY_EVENTS)])
+            writer.writerow(["average_recovery_time", f"{avg_recovery_time:.6f}"])
+            writer.writerow(["min_recovery_time", f"{min_recovery_time:.6f}"])
+            writer.writerow(["max_recovery_time", f"{max_recovery_time:.6f}"])
+            writer.writerow(["total_orphan_events", len(ORPHAN_EVENTS)])
+            writer.writerow(["total_role_changes", len(ROLE_CHANGE_EVENTS)])
+            writer.writerow(["current_orphan_count", len(ORPHAN_NODES)])
+        
+        print(f"✅ Recovery statistics saved to recovery_summary.csv")
+    else:
+        print(f"\n⚠️ No recovery events occurred during simulation")
+
+write_recovery_statistics()
 close_log_file()
 print("Simulation Finished")
 
