@@ -25,7 +25,7 @@ RX_CURRENT = 18.8  # mA
 
 
 ## simulation properties
-SIM_NODE_COUNT = 20  # noce count in simulation
+SIM_NODE_COUNT = 100  # noce count in simulation
 SIM_NODE_PLACING_CELL_SIZE = 75  # cell size to place one node
 SIM_DURATION = 5000  # simulation Duration in seconds
 SIM_TIME_SCALE = 0.001  #  The real time dureation of 1 second simualtion time
@@ -51,6 +51,15 @@ NEIGHBOR_INFO_BROADCAST_INTERVAL = 30
 REPAIRING_METHOD = 'FIND_ANOTHER_PARENT' # 'ALL_ORPHAN', 'FIND_ANOTHER_PARENT'
 EXPORT_CH_CSV_INTERVAL = 10  # simulation time units;
 EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # simulation time units;
+
+## minimal overlap and router properties
+ENABLE_MINIMAL_OVERLAP = False  # Enable minimal overlap cluster formation
+ENABLE_ROUTER_COMMUNICATION = True  # Enable router-based communication between cluster heads
+ENABLE_CH_ROLE_MIGRATION = True  # Enable cluster head role migration
+MIN_CLUSTER_DISTANCE = 200  # Minimum distance between cluster heads (meters) for minimal overlap
+ROUTER_SELECTION_DISTANCE = 150  # Distance threshold for router selection (meters)
+CH_MIGRATION_THRESHOLD = 0.7  # Energy threshold (0-1) below which CH migration is triggered
+CH_MIGRATION_CHECK_INTERVAL = 100  # Interval to check for CH migration (simulation time)
 
 ## failure and recovery properties
 ENABLE_NODE_FAILURE = True  # Enable random node failure simulation

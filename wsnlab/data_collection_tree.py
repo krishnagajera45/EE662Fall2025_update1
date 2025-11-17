@@ -939,8 +939,13 @@ class SensorNode(wsn.Node):
         path_str = "UNKNOWN"  # default
         dest = pck.get('dest')
         
+        # Validate destination - must not be None
+        if dest is None:
+            self.log(f"[ERROR] Node {self.id}: Cannot route packet with None destination")
+            return
+        
         # Step 1: Check if destination is myself or my cluster head
-        if dest == self.addr or (self.ch_addr is not None and dest == self.ch_addr):
+        if (self.addr is not None and dest == self.addr) or (self.ch_addr is not None and dest == self.ch_addr):
             # Destination is me - deliver directly
             pck["next_hop"] = dest
             path_str = "LOCAL"
@@ -1117,11 +1122,18 @@ class SensorNode(wsn.Node):
         #choose random node from local neighbor map
         #    self.route_and_forward_package({'dest': self.root_addr, 'type': 'SENSOR', 'source': self.addr, 'sensor_value': random.uniform(10,50)})
         if self.local_neighbor_map:
-            rand_key = random.choice(list(self.local_neighbor_map.keys()))
-            #self.send({'dest': self.local_neighbor_map[rand_key]['addr'], 'type': 'SENSOR_DATA', 'source': self.addr,
-            #       'gui': self.id, 'sensor_value': random.uniform(0,100)})
-            self.route_and_forward_package({'dest': self.local_neighbor_map[rand_key]['addr'], 'type': 'SENSOR_DATA', 'source': self.addr,
-               'gui': self.id, 'sensor_value': random.uniform(0,100)})
+            # Filter neighbors that have valid addresses
+            neighbors_with_addr = {k: v for k, v in self.local_neighbor_map.items() 
+                                 if v.get('addr') is not None}
+            if neighbors_with_addr:
+                rand_key = random.choice(list(neighbors_with_addr.keys()))
+                dest_addr = neighbors_with_addr[rand_key]['addr']
+                #self.send({'dest': dest_addr, 'type': 'SENSOR_DATA', 'source': self.addr,
+                #       'gui': self.id, 'sensor_value': random.uniform(0,100)})
+                self.route_and_forward_package({'dest': dest_addr, 'type': 'SENSOR_DATA', 'source': self.addr,
+                   'gui': self.id, 'sensor_value': random.uniform(0,100), 'created_at': self.now})
+            else:
+                self.log(f"[WARNING] Node {self.id}: No neighbors with valid addresses for sensor data")
     ###################
     def broadcast_neighbor_info(self):
         """Broadcasts neighbor information to enable multi-hop mesh routing discovery.
@@ -1136,10 +1148,20 @@ class SensorNode(wsn.Node):
         for neighbor_id, neighbor_data in self.local_neighbor_map.items():
             if neighbor_data['mesh_hop_distance'] == config.MAX_MESH_DISCOVERY_HOPS:
                 discovered_mesh_neighbors[neighbor_id] = neighbor_data
+        
         # Send collected neighbor information to all immediate (1-hop) neighbors
-        for neighbor_entry in self.local_neighbor_map.values():
-            if neighbor_entry['mesh_hop_distance'] == config.MAX_MESH_DISCOVERY_HOPS:
-                pck = {'dest': neighbor_entry['source'], 'type': 'NEIGHBOR_INFO_BROADCAST', 'source': self.addr,
+        # This allows 1-hop neighbors to learn about N-hop neighbors
+        for neighbor_id, neighbor_entry in self.local_neighbor_map.items():
+            if neighbor_entry['mesh_hop_distance'] == 1:  # Send to 1-hop neighbors
+                # Get destination address - prefer 'addr', fallback to 'source'
+                dest_addr = neighbor_entry.get('addr') or neighbor_entry.get('source')
+                
+                # Skip if no valid destination address
+                if dest_addr is None:
+                    self.log(f"[WARNING] Node {self.id}: Cannot broadcast neighbor info to neighbor {neighbor_id} - no address")
+                    continue
+                
+                pck = {'dest': dest_addr, 'type': 'NEIGHBOR_INFO_BROADCAST', 'source': self.addr,
                         'gui': self.id, 'neighbors': discovered_mesh_neighbors, 'created_at': self.now}
                 write_log(self.id, f"PKT_CREATE type=NEIGHBOR_INFO_BROADCAST created_at={self.now:.3f}", self.now)
                 self.send(pck)
