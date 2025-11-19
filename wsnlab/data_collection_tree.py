@@ -1307,8 +1307,12 @@ class SensorNode(wsn.Node):
                         new_addr = wsn.Addr(pck['source'].node_addr, 254)
                         self.send_network_reply(pck['source'], new_addr)
             if pck['type'] == 'JOIN_ACK':
-                self.members_table.append(pck['source'])
-                self.log(f"[MEMBER_TABLE] Node {self.id}: Added {pck['source']} to members_table (size={len(self.members_table)})")
+                # Only add to members_table if within capacity limit
+                if len(self.members_table) < config.NUM_OF_CHILDREN:
+                    self.members_table.append(pck['source'])
+                    self.log(f"[MEMBER_TABLE] Node {self.id}: Added {pck['source']} to members_table (size={len(self.members_table)})")
+                else:
+                    self.log(f"[MEMBER_TABLE] Node {self.id}: REJECTED {pck['source']} - members_table FULL (size={len(self.members_table)}/{config.NUM_OF_CHILDREN})")
             if pck['type'] == 'NETWORK_UPDATE':
                 self.child_networks_table[pck['gui']] = pck['child_networks']
                 self.log(f"[CHILD_NETWORKS] Node {self.id}: Updated child_networks_table for gui={pck['gui']}, networks={pck['child_networks']}")
@@ -1450,9 +1454,10 @@ class SensorNode(wsn.Node):
                         self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: ASSIGNED address {assigned_addr} to pending node {gui} (node_id={avail_node_id})")
                         self.send_join_reply(gui, assigned_addr)
                     else:
-                        self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: WARNING - No address available for pending node {gui} (should not happen on initialization)")
-                        # Still send reply with GUI as node_id (fallback)
-                        self.send_join_reply(gui, wsn.Addr(self.ch_addr.net_addr, gui))
+                        # Cluster full - no address available for pending node
+                        self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: CLUSTER FULL! Cannot assign address to pending node {gui}")
+                        self.log(f"[DEBUG CLUSTER_SIZE] CLUSTER_HEAD Node {self.id}: No JOIN_REPLY sent (node will retry or choose another parent)")
+                        # No reply sent - node will retry or choose another parent
 
         elif self.role == Roles.UNDISCOVERED:  # if the node is undiscovered
             if pck['type'] == 'HEART_BEAT':  # it kills probe timer, becomes unregistered and sets join request timer once received heart beat
