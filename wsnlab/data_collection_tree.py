@@ -1032,6 +1032,7 @@ class SensorNode(wsn.Node):
                     if child_gui in self.local_neighbor_map:
                         pck['next_hop'] = self.local_neighbor_map[child_gui].get('addr')
                         path_str = "TREE_CHILD"
+                        self.log(f"[ROUTING] Node {self.id}: TREE routing (CHILD) - dest={dest} via child_gui={child_gui} in child_networks_table")
                         next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
                         log_packet_route(pck, self, next_hop_str, path_str)
                         if pck.get('next_hop') is not None:
@@ -1046,18 +1047,22 @@ class SensorNode(wsn.Node):
                 if parent_ch_addr is not None:
                     pck['next_hop'] = parent_ch_addr
                     path_str = "TREE_PARENT"
+                    self.log(f"[ROUTING] Node {self.id}: TREE routing (PARENT) - dest={dest}, sending to parent_ch={parent_ch_addr}")
                 else:
                     # No parent CH address - cannot route
                     path_str = "NO_ROUTE"
                     pck['next_hop'] = None
+                    self.log(f"[ROUTING] Node {self.id}: NO_ROUTE - parent has no CH address")
             else:
                 # No parent - cannot route
                 path_str = "NO_ROUTE"
                 pck['next_hop'] = None
+                self.log(f"[ROUTING] Node {self.id}: NO_ROUTE - no parent available")
         else:
             # Root node - cannot route further up
             path_str = "NO_ROUTE"
             pck['next_hop'] = None
+            self.log(f"[ROUTING] Node {self.id}: NO_ROUTE - ROOT cannot route further up")
 
         # Log and send the packet
         next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
@@ -1303,8 +1308,10 @@ class SensorNode(wsn.Node):
                         self.send_network_reply(pck['source'], new_addr)
             if pck['type'] == 'JOIN_ACK':
                 self.members_table.append(pck['source'])
+                self.log(f"[MEMBER_TABLE] Node {self.id}: Added {pck['source']} to members_table (size={len(self.members_table)})")
             if pck['type'] == 'NETWORK_UPDATE':
                 self.child_networks_table[pck['gui']] = pck['child_networks']
+                self.log(f"[CHILD_NETWORKS] Node {self.id}: Updated child_networks_table for gui={pck['gui']}, networks={pck['child_networks']}")
                 if self.role != Roles.ROOT:
                     self.send_network_update()
             if pck['type'] == 'I_AM_ORPHAN':  # if the sender is parent, starts repairing procedure
