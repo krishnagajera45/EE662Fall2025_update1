@@ -755,18 +755,40 @@ class SensorNode(wsn.Node):
 
     ###################
     def update_neighbor(self, pck):
+        """Update neighbor table with 1-hop neighbor information from HEART_BEAT packet.
+        
+        This function:
+        1. Calculates Euclidean distance to neighbor
+        2. Sets mesh_hop_distance = 1 (direct neighbor)
+        3. Stores neighbor info in local_neighbor_map
+        4. Updates candidate_parents_table if neighbor has address
+        5. Logs node state change
+        """
         pck = pck.copy()
         pck['arrival_time'] = self.now
-        # compute Euclidean distance between self and neighbor
+        
+        # Compute Euclidean distance between self and neighbor
         if pck['gui'] in NODE_POS and self.id in NODE_POS:
             x1, y1 = NODE_POS[self.id]
             x2, y2 = NODE_POS[pck['gui']]
             pck['distance'] = math.hypot(x1 - x2, y1 - y2)
+        
+        # Mark as 1-hop neighbor (direct neighbor discovered via HEART_BEAT)
         pck['mesh_hop_distance'] = 1
+        is_new_neighbor = pck['gui'] not in self.local_neighbor_map
         self.local_neighbor_map[pck['gui']] = pck
+        
         # Update last heartbeat time for failure detection
         self.last_heartbeat_time[pck['gui']] = self.now
+        
+        # Debug: Log 1-hop neighbor discovery
+        if is_new_neighbor:
+            neighbor_addr = pck.get('addr', 'None')
+            distance = pck.get('distance', 'Unknown')
+            self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Discovered 1-hop neighbor {pck['gui']} (addr={neighbor_addr}, dist={distance:.2f}m)")
+            write_log(self.id, f"NEIGHBOR_1HOP_DISCOVERED neighbor={pck['gui']} addr={neighbor_addr} distance={distance:.2f}", self.now)
 
+        # Update candidate_parents_table if neighbor has address
         if pck.get('addr') is not None:
             if pck['gui'] not in self.child_networks_table.keys() or pck['addr'] not in self.members_table:
                 # Store full packet info in candidate_parents_table for distance-based power selection
@@ -840,7 +862,6 @@ class SensorNode(wsn.Node):
             next_hop_str = str(dest) if dest is not None else "BROADCAST"
         ptype = pck.get('type', 'UNKNOWN')
         write_log(self.id, f"TX_SEND type={ptype} next={next_hop_str}", self.now)
-        self.log(f"[DEBUG] SensorNode.send() called: type={ptype}, from={self.id}, next_hop={next_hop_str}")
         super().send(pck)
 
     ###################
@@ -971,10 +992,12 @@ class SensorNode(wsn.Node):
                 # Direct neighbor - send directly
                 pck['next_hop'] = dest
                 path_str = "DIRECT"
+                self.log(f"[ROUTING] Node {self.id}: MESH routing (DIRECT) - dest={dest}, 1-hop neighbor")
             else:
                 # Multi-hop neighbor - use next_hop from local_neighbor_map
                 pck['next_hop'] = neighbor_match.get('next_hop', dest)
                 path_str = "MESH"
+                self.log(f"[ROUTING] Node {self.id}: MESH routing (MULTI-HOP) - dest={dest}, {hop_distance}-hop via {pck['next_hop']}")
             next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
             log_packet_route(pck, self, next_hop_str, path_str)
             self.send(pck)
@@ -985,6 +1008,7 @@ class SensorNode(wsn.Node):
             # Member of my cluster - send directly
             pck['next_hop'] = dest
             path_str = "CLUSTER_DIRECT"
+            self.log(f"[ROUTING] Node {self.id}: CLUSTER routing - dest={dest} is in members_table (same cluster)")
             next_hop_str = str(pck.get('next_hop', 'UNKNOWN'))
             log_packet_route(pck, self, next_hop_str, path_str)
             self.send(pck)
@@ -1137,22 +1161,33 @@ class SensorNode(wsn.Node):
     ###################
     def broadcast_neighbor_info(self):
         """Broadcasts neighbor information to enable multi-hop mesh routing discovery.
-
-        Args:
-
-        Returns:
-
+        
+        This function implements neighbor table sharing:
+        1. Collects neighbors that are exactly MAX_MESH_DISCOVERY_HOPS away (typically 1-hop)
+        2. Sends this information to all 1-hop neighbors
+        3. Recipients will learn about 2-hop neighbors (1-hop + 1 = 2-hop)
+        
+        This enables multi-hop neighbor discovery beyond direct neighbors.
         """
         # For N-hop mesh routing, share neighbors that are exactly N hops away
+        # With MAX_MESH_DISCOVERY_HOPS=1, we share our 1-hop neighbors
+        # Recipients will learn them as 2-hop neighbors
         discovered_mesh_neighbors = {}
         for neighbor_id, neighbor_data in self.local_neighbor_map.items():
             if neighbor_data['mesh_hop_distance'] == config.MAX_MESH_DISCOVERY_HOPS:
                 discovered_mesh_neighbors[neighbor_id] = neighbor_data
         
+        # Debug: Log neighbor info broadcast
+        if discovered_mesh_neighbors:
+            neighbor_list = list(discovered_mesh_neighbors.keys())
+            self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Broadcasting {len(discovered_mesh_neighbors)} neighbor(s) to 1-hop neighbors: {neighbor_list}")
+            write_log(self.id, f"NEIGHBOR_BROADCAST sharing={len(discovered_mesh_neighbors)} neighbors={neighbor_list}", self.now)
+        
         # Send collected neighbor information to all immediate (1-hop) neighbors
         # This allows 1-hop neighbors to learn about N-hop neighbors
+        sent_count = 0
         for neighbor_id, neighbor_entry in self.local_neighbor_map.items():
-            if neighbor_entry['mesh_hop_distance'] == 1:  # Send to 1-hop neighbors
+            if neighbor_entry['mesh_hop_distance'] == 1:  # Send to 1-hop neighbors only
                 # Get destination address - prefer 'addr', fallback to 'source'
                 dest_addr = neighbor_entry.get('addr') or neighbor_entry.get('source')
                 
@@ -1165,6 +1200,11 @@ class SensorNode(wsn.Node):
                         'gui': self.id, 'neighbors': discovered_mesh_neighbors, 'created_at': self.now}
                 write_log(self.id, f"PKT_CREATE type=NEIGHBOR_INFO_BROADCAST created_at={self.now:.3f}", self.now)
                 self.send(pck)
+                sent_count += 1
+        
+        # Debug: Log broadcast completion
+        if discovered_mesh_neighbors and sent_count > 0:
+            self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Sent neighbor info to {sent_count} 1-hop neighbor(s)")
 
     ###################
     def on_receive(self, pck):
@@ -1200,7 +1240,7 @@ class SensorNode(wsn.Node):
         
         # Log delay if packet reached final destination
         if is_final_destination and 'created_at' in pck:
-                    log_packet_delivery(pck, self)
+            log_packet_delivery(pck, self)
 
         if self.role == Roles.ROOT or self.role == Roles.CLUSTER_HEAD:  # if the node is root or cluster head
             if 'next_hop' in pck.keys() and pck['dest'] != self.addr and (self.ch_addr is None or pck['dest'] != self.ch_addr):  # forwards message if destination is not itself
@@ -1272,20 +1312,37 @@ class SensorNode(wsn.Node):
                 self.log(f"[RECOVERY] ROOT Node {self.id}: Received I_AM_ORPHAN from node {pck.get('gui')}")
             if pck['type'] == 'NEIGHBOR_INFO_BROADCAST':
                 # Process shared neighbor information: add discovered neighbors with incremented hop distance
+                # ROOT doesn't need multi-hop neighbors (it's the root of the tree)
                 if self.role != Roles.ROOT:
+                    learned_count = 0
                     for neighbor_id, neighbor_packet in pck['neighbors'].items():
                         if neighbor_id not in self.local_neighbor_map and neighbor_id != self.id:
                             neighbor_entry = neighbor_packet.copy()
-                            neighbor_entry['mesh_hop_distance'] += 1
+                            # Increment hop distance: 1-hop neighbor becomes 2-hop neighbor
+                            old_hop = neighbor_entry.get('mesh_hop_distance', 1)
+                            neighbor_entry['mesh_hop_distance'] = old_hop + 1
+                            # Set next_hop to the node that shared this information (for routing)
                             neighbor_entry['next_hop'] = pck['source']
                             self.local_neighbor_map[neighbor_id] = neighbor_entry
-                            # Log DV_KSHARE
+                            learned_count += 1
+                            
+                            # Log DV_KSHARE (Distance Vector Knowledge Share)
                             neighbor_addr = neighbor_entry.get('addr')
                             if neighbor_addr is not None:
                                 via_addr = pck.get('source')
-                                write_log(self.id, f"DV_KSHARE from={pck['gui']} tgt={neighbor_id} hop={neighbor_entry['mesh_hop_distance']} via={via_addr}", self.now)
+                                via_gui = pck.get('gui')
+                                write_log(self.id, f"DV_KSHARE from={via_gui} tgt={neighbor_id} hop={neighbor_entry['mesh_hop_distance']} via={via_addr}", self.now)
+                                self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Learned {neighbor_entry['mesh_hop_distance']}-hop neighbor {neighbor_id} via node {via_gui} (addr={via_addr})")
+                            
+                            # Safety check: mesh_hop_distance should not exceed MAX_MESH_DISCOVERY_HOPS + 1
                             if neighbor_entry['mesh_hop_distance'] > config.MAX_MESH_DISCOVERY_HOPS + 1:
-                                raise Exception("Something went wrong")
+                                self.log(f"[ERROR] Node {self.id}: Invalid mesh_hop_distance {neighbor_entry['mesh_hop_distance']} for neighbor {neighbor_id}")
+                                raise Exception(f"Invalid mesh_hop_distance: {neighbor_entry['mesh_hop_distance']} > {config.MAX_MESH_DISCOVERY_HOPS + 1}")
+                    
+                    # Debug: Log multi-hop neighbor learning summary
+                    if learned_count > 0:
+                        self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Learned {learned_count} multi-hop neighbor(s) from node {pck.get('gui')}")
+                        write_log(self.id, f"NEIGHBOR_MULTIHOP_LEARNED count={learned_count} from={pck.get('gui')}", self.now)
             if pck['type'] == 'SENSOR_DATA':
                 pass
                 # self.log(str(pck['source'])+'--'+str(pck['sensor_value']))
@@ -1310,19 +1367,36 @@ class SensorNode(wsn.Node):
                     self.repair()
             if pck['type'] == 'NEIGHBOR_INFO_BROADCAST':
                 # Process shared neighbor information: add discovered neighbors with incremented hop distance
+                # REGISTERED nodes also process multi-hop neighbor information
+                learned_count = 0
                 for neighbor_id, neighbor_packet in pck['neighbors'].items():
                     if neighbor_id not in self.local_neighbor_map and neighbor_id != self.id:
                         neighbor_entry = neighbor_packet.copy()
-                        neighbor_entry['mesh_hop_distance'] += 1
+                        # Increment hop distance: 1-hop neighbor becomes 2-hop neighbor
+                        old_hop = neighbor_entry.get('mesh_hop_distance', 1)
+                        neighbor_entry['mesh_hop_distance'] = old_hop + 1
+                        # Set next_hop to the node that shared this information (for routing)
                         neighbor_entry['next_hop'] = pck['source']
                         self.local_neighbor_map[neighbor_id] = neighbor_entry
-                        # Log DV_KSHARE
+                        learned_count += 1
+                        
+                        # Log DV_KSHARE (Distance Vector Knowledge Share)
                         neighbor_addr = neighbor_entry.get('addr')
                         if neighbor_addr is not None:
                             via_addr = pck.get('source')
-                            write_log(self.id, f"DV_KSHARE from={pck['gui']} tgt={neighbor_id} hop={neighbor_entry['mesh_hop_distance']} via={via_addr}", self.now)
+                            via_gui = pck.get('gui')
+                            write_log(self.id, f"DV_KSHARE from={via_gui} tgt={neighbor_id} hop={neighbor_entry['mesh_hop_distance']} via={via_addr}", self.now)
+                            self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Learned {neighbor_entry['mesh_hop_distance']}-hop neighbor {neighbor_id} via node {via_gui} (addr={via_addr})")
+                        
+                        # Safety check: mesh_hop_distance should not exceed MAX_MESH_DISCOVERY_HOPS + 1
                         if neighbor_entry['mesh_hop_distance'] > config.MAX_MESH_DISCOVERY_HOPS + 1:
-                            raise Exception("Something went wrong")
+                            self.log(f"[ERROR] Node {self.id}: Invalid mesh_hop_distance {neighbor_entry['mesh_hop_distance']} for neighbor {neighbor_id}")
+                            raise Exception(f"Invalid mesh_hop_distance: {neighbor_entry['mesh_hop_distance']} > {config.MAX_MESH_DISCOVERY_HOPS + 1}")
+                
+                # Debug: Log multi-hop neighbor learning summary
+                if learned_count > 0:
+                    self.log(f"[NEIGHBOR_TABLE] Node {self.id}: Learned {learned_count} multi-hop neighbor(s) from node {pck.get('gui')}")
+                    write_log(self.id, f"NEIGHBOR_MULTIHOP_LEARNED count={learned_count} from={pck.get('gui')}", self.now)
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
                 old_role = self.role
                 self.set_role(Roles.CLUSTER_HEAD)
@@ -1482,8 +1556,8 @@ class SensorNode(wsn.Node):
             if not self.is_failed:  # Only send heartbeat if node is not failed
                 self.send_heart_beat()
                 self.set_timer('TIMER_HEART_BEAT', config.HEART_BEAT_TIME_INTERVAL)
-            # Check for dead neighbors and handle failures
-            self.check_neighbors()
+                # Check for dead neighbors and handle failures
+                self.check_neighbors()
         #elif name == "NET_REQ_TIMEOUT": #check if we are a clusterhead yet, if we are, cancel timer, else, resend
         #    self.log("TIMEOUT")
         #    if self.role == Roles.CLUSTER_HEAD or self.role == Roles.ROOT:
