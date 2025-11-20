@@ -893,7 +893,9 @@ class SensorNode(wsn.Node):
                 # yield self.timeout(.5)
                 self.send_heart_beat()
             if pck['type'] == 'JOIN_REQUEST':  # it sends a network request to the root
-                self.received_JR_guis.append(pck['gui'])
+                # Avoid duplicates in received_JR_guis
+                if pck['gui'] not in self.received_JR_guis:
+                    self.received_JR_guis.append(pck['gui'])
                 # yield self.timeout(.5)
                 self.send_network_request()
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
@@ -990,15 +992,15 @@ class SensorNode(wsn.Node):
                     self.set_role(Roles.ROOT)
                     self.members_table = []
                     self.scene.nodecolor(self.id, 0, 0, 0)
-                    self.addr = wsn.Addr(self.id, 254)
-                    self.ch_addr = wsn.Addr(self.id, 254)
+                    self.addr = wsn.Addr(0, 254)  # ROOT uses net_addr=0
+                    self.ch_addr = wsn.Addr(0, 254)
                     self.root_addr = self.addr
                     self.hop_count = 0
                     
                     # Initialize address pools for ROOT
                     self._init_address_pool()  # For direct children
-                    self.cluster_addr_pool = {i: None for i in range(1, config.NUM_OF_CLUSTERS + 1)}  # For cluster IDs
-                    self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Initialized pools - {config.NUM_OF_CHILDREN} child slots, {config.NUM_OF_CLUSTERS} cluster IDs")
+                    self.cluster_addr_pool = {i: None for i in range(1, config.NUM_OF_CLUSTERS + 1)}  # For cluster IDs (start from 1, ROOT uses 0)
+                    self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Initialized pools - {config.NUM_OF_CHILDREN} child slots, {config.NUM_OF_CLUSTERS} cluster IDs (ROOT uses net_addr=0)")
                     
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                     # Start neighbor sharing for ROOT
