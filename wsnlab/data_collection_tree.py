@@ -25,6 +25,16 @@ REGISTRATION_LOG_FILE = "registration_log.csv"
 PACKET_PATH_FILE = "packet_paths.csv"
 DATA_PACKET_COUNTER = 0
 
+# --- recovery tracking ---
+RECOVERY_LOG_FILE = "recovery_events.csv"
+ORPHAN_LOG_FILE = "orphan_events.csv"
+ROLE_CHANGE_LOG_FILE = "role_changes.csv"
+FAILED_NODES = set()  # Set of currently failed node IDs
+ORPHANED_NODES = set()  # Set of currently orphaned node IDs
+RECOVERY_EVENTS = []  # List of recovery events
+SCHEDULED_FAILURES = []  # List of (time, node_id) tuples for scheduled failures
+SCHEDULED_RECOVERIES = []  # List of (time, node_id, failure_time) tuples
+
 # --- tracking containers ---
 ALL_NODES = []              # node objects
 CLUSTER_HEADS = []
@@ -72,7 +82,10 @@ def init_log_file():
     timestamp = datetime.now().strftime("%d-%m-%y-%H%M")
     LOG_FILE_NAME = f"wsn_log_{timestamp}.log"
     LOG_FILE = open(LOG_FILE_NAME, "w", buffering=1)
+    # Don't use log_to_console_and_file here since LOG_FILE was just opened
     print(f"Logging to {LOG_FILE_NAME}")
+    LOG_FILE.write(f"Logging to {LOG_FILE_NAME}\n")
+    LOG_FILE.flush()
     # reset packet route file each run
     with open(PACKET_ROUTE_FILE, "w", newline="") as f:
         pass
@@ -87,6 +100,17 @@ def init_log_file():
         writer = csv.writer(f)
         writer.writerow(["packet_id", "packet_type", "source_gui", "dest_gui",
                          "path", "hop_count", "started_at", "delivered_at", "delay"])
+    # Initialize recovery tracking files
+    with open(RECOVERY_LOG_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["node_id", "failure_time", "recovery_time", "downtime", 
+                         "orphan_count_at_recovery", "role_before_failure", "role_after_recovery"])
+    with open(ORPHAN_LOG_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["node_id", "time", "reason", "parent_id"])
+    with open(ROLE_CHANGE_LOG_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["node_id", "old_role", "new_role", "time", "reason"])
     PACKET_ROUTE_HEADER_WRITTEN = False
     return LOG_FILE_NAME
 
@@ -224,9 +248,9 @@ def calculate_and_log_average_packet_delay():
             print("⚠️ No packet delays recorded.")
             return
         avg_delay = sum(delays) / len(delays)
-        print(f"📦 Average packet delay: {avg_delay:.6f}s (samples={len(delays)})")
+        log_to_console_and_file(f"📦 Average packet delay: {avg_delay:.6f}s (samples={len(delays)})")
     except FileNotFoundError:
-        print("⚠️ Packet delay log not found.")
+        log_to_console_and_file("⚠️ Packet delay log not found.")
 
 
 def calculate_and_log_average_join_time():
@@ -238,12 +262,127 @@ def calculate_and_log_average_join_time():
             for row in reader:
                 joins.append(float(row["join_delay"]))
         if not joins:
-            print("⚠️ No registration data recorded.")
+            log_to_console_and_file("⚠️ No registration data recorded.")
             return
         avg_join = sum(joins) / len(joins)
-        print(f"👥 Average join time: {avg_join:.6f}s (nodes={len(joins)})")
+        log_to_console_and_file(f"👥 Average join time: {avg_join:.6f}s (nodes={len(joins)})")
     except FileNotFoundError:
-        print("⚠️ Registration log not found.")
+        log_to_console_and_file("⚠️ Registration log not found.")
+
+
+def log_orphan_event(node_id, time, reason, parent_id=None):
+    """Log when a node becomes orphaned."""
+    try:
+        with open(ORPHAN_LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([node_id, f"{time:.6f}", reason, parent_id if parent_id else ""])
+        ORPHANED_NODES.add(node_id)
+    except Exception:
+        pass
+
+
+def log_role_change(node_id, old_role, new_role, time, reason=""):
+    """Log when a node changes roles."""
+    try:
+        with open(ROLE_CHANGE_LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([node_id, _role_name(old_role), _role_name(new_role), f"{time:.6f}", reason])
+    except Exception:
+        pass
+
+
+def log_recovery_event(node_id, failure_time, recovery_time, orphan_count, role_before, role_after):
+    """Log when a failed node recovers."""
+    try:
+        downtime = recovery_time - failure_time
+        with open(RECOVERY_LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([node_id, f"{failure_time:.6f}", f"{recovery_time:.6f}", 
+                           f"{downtime:.6f}", orphan_count, _role_name(role_before), _role_name(role_after)])
+        RECOVERY_EVENTS.append({
+            'node_id': node_id,
+            'failure_time': failure_time,
+            'recovery_time': recovery_time,
+            'downtime': downtime,
+            'orphan_count': orphan_count
+        })
+    except Exception:
+        pass
+
+
+def log_to_console_and_file(message):
+    """Write message to both console and log file."""
+    print(message)
+    if config.ENABLE_LOG_FILE and LOG_FILE is not None:
+        try:
+            LOG_FILE.write(message + "\n")
+            LOG_FILE.flush()
+        except Exception:
+            pass
+
+
+def calculate_and_log_recovery_statistics():
+    """Generate recovery statistics report."""
+    log_to_console_and_file("")
+    log_to_console_and_file("="*70)
+    log_to_console_and_file("🔧 NETWORK RECOVERY STATISTICS")
+    log_to_console_and_file("="*70)
+    
+    try:
+        # Recovery events
+        with open(RECOVERY_LOG_FILE, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            recoveries = list(reader)
+        
+        if recoveries:
+            downtimes = [float(r['downtime']) for r in recoveries]
+            orphan_counts = [int(r['orphan_count_at_recovery']) for r in recoveries]
+            
+            log_to_console_and_file(f"\n📊 Node Failures & Recoveries: {len(recoveries)} events")
+            log_to_console_and_file(f"   Average recovery time: {sum(downtimes)/len(downtimes):.2f}s")
+            log_to_console_and_file(f"   Min recovery time: {min(downtimes):.2f}s")
+            log_to_console_and_file(f"   Max recovery time: {max(downtimes):.2f}s")
+            log_to_console_and_file(f"   Total orphan nodes created: {sum(orphan_counts)}")
+            
+            log_to_console_and_file(f"\n📋 Recovery Details:")
+            for r in recoveries:
+                log_to_console_and_file(f"   Node {r['node_id']}: Failed at {float(r['failure_time']):.1f}s, "
+                      f"Recovered at {float(r['recovery_time']):.1f}s, "
+                      f"Downtime: {float(r['downtime']):.1f}s, "
+                      f"Orphans: {r['orphan_count_at_recovery']}")
+        else:
+            log_to_console_and_file("\n⚠️  No node failures occurred during simulation")
+        
+        # Orphan events
+        with open(ORPHAN_LOG_FILE, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            orphans = list(reader)
+        
+        if orphans:
+            log_to_console_and_file(f"\n👥 Orphan Events: {len(orphans)} total")
+            orphan_reasons = Counter([o['reason'] for o in orphans])
+            for reason, count in orphan_reasons.most_common():
+                log_to_console_and_file(f"   {reason}: {count} nodes")
+        
+        # Role changes
+        with open(ROLE_CHANGE_LOG_FILE, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            role_changes = list(reader)
+        
+        if role_changes:
+            log_to_console_and_file(f"\n🔄 Role Changes: {len(role_changes)} total")
+            for rc in role_changes[:10]:  # Show first 10
+                log_to_console_and_file(f"   Node {rc['node_id']}: {rc['old_role']} → {rc['new_role']} "
+                      f"at {float(rc['time']):.1f}s ({rc['reason']})")
+            if len(role_changes) > 10:
+                log_to_console_and_file(f"   ... and {len(role_changes)-10} more role changes")
+        
+    except FileNotFoundError as e:
+        log_to_console_and_file(f"\n⚠️  Recovery logs not found: {e}")
+    except Exception as e:
+        log_to_console_and_file(f"\n⚠️  Error generating recovery statistics: {e}")
+    
+    log_to_console_and_file("="*70)
 
 
 Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD')
@@ -297,6 +436,12 @@ class SensorNode(wsn.Node):
         
         # Multi-hop neighbor discovery
         self.multihop_neighbor_table = {}  # {neighbor_gui: {'hop_dist': int, 'next_hop': gui, 'distance': float}}
+        
+        # Node failure and recovery tracking
+        self.is_failed = False
+        self.failure_time = None
+        self.role_before_failure = None
+        self.children_before_failure = []
 
     ###################
     def run(self):
@@ -318,7 +463,7 @@ class SensorNode(wsn.Node):
 
     ###################
 
-    def set_role(self, new_role, *, recolor=True):
+    def set_role(self, new_role, *, recolor=True, reason=""):
         """Central place to switch roles, keep tallies, and (optionally) recolor."""
         old_role = getattr(self, "role", None)
         if old_role is not None:
@@ -327,6 +472,10 @@ class SensorNode(wsn.Node):
                 ROLE_COUNTS.pop(old_role, None)
         ROLE_COUNTS[new_role] += 1
         self.role = new_role
+        
+        # Log role changes (except for initial UNDISCOVERED)
+        if old_role is not None and old_role != new_role:
+            log_role_change(self.id, old_role, new_role, self.sim.now, reason)
 
         if recolor:
             if new_role == Roles.UNDISCOVERED:
@@ -343,8 +492,117 @@ class SensorNode(wsn.Node):
                 self.set_timer('TIMER_EXPORT_CH_CSV', config.EXPORT_CH_CSV_INTERVAL)
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
 
-
-
+    ###################
+    # Node Failure and Recovery Methods
+    ###################
+    
+    def fail_node(self):
+        """Simulate node failure - node stops all operations."""
+        if self.is_failed or self.role == Roles.ROOT:
+            return  # Cannot fail ROOT or already failed node
+        
+        # Only fail nodes that have joined the network (REGISTERED or CLUSTER_HEAD)
+        if self.role not in [Roles.REGISTERED, Roles.CLUSTER_HEAD]:
+            if config.ENABLE_RECOVERY_DEBUG:
+                self.log(f"[RECOVERY] Node {self.id} failure skipped - not yet registered (role: {_role_name(self.role)})")
+            return
+        
+        self.is_failed = True
+        self.failure_time = self.sim.now
+        self.role_before_failure = self.role
+        self.children_before_failure = list(self.members_table)
+        
+        # Track as failed
+        FAILED_NODES.add(self.id)
+        
+        # Mark children as orphans
+        orphan_count = 0
+        for child_addr in self.members_table:
+            child_node = self._find_node_by_addr(child_addr)
+            if child_node:
+                child_node.become_orphan(f"Parent node {self.id} failed")
+                orphan_count += 1
+        
+        # Stop all operations
+        self.kill_all_timers()
+        
+        # Change visual state
+        self.scene.nodecolor(self.id, 0.5, 0.5, 0.5)  # Gray color for failed
+        
+        # Log the failure
+        if config.ENABLE_RECOVERY_DEBUG:
+            self.log(f"[RECOVERY] Node {self.id} FAILED at {self.sim.now:.2f}s | "
+                    f"Role: {_role_name(self.role_before_failure)} | "
+                    f"Orphaned children: {orphan_count}")
+        
+        log_role_change(self.id, self.role_before_failure, Roles.UNDISCOVERED, 
+                       self.sim.now, f"Node failed (orphaned {orphan_count} children)")
+    
+    def recover_node(self):
+        """Simulate node recovery - node restarts and rejoins network."""
+        if not self.is_failed:
+            return
+        
+        recovery_time = self.sim.now
+        downtime = recovery_time - self.failure_time
+        orphan_count = len([n for n in ALL_NODES if n.id in ORPHANED_NODES])
+        
+        # Clear failure state
+        self.is_failed = False
+        FAILED_NODES.discard(self.id)
+        
+        # Log recovery event
+        log_recovery_event(self.id, self.failure_time, recovery_time, 
+                          orphan_count, self.role_before_failure, Roles.UNDISCOVERED)
+        
+        if config.ENABLE_RECOVERY_DEBUG:
+            self.log(f"[RECOVERY] Node {self.id} RECOVERED at {recovery_time:.2f}s | "
+                    f"Downtime: {downtime:.2f}s | "
+                    f"Network orphans: {orphan_count}")
+        
+        # Restart as undiscovered node
+        self.scene.nodecolor(self.id, 1, 1, 1)  # White color
+        self.addr = None
+        self.ch_addr = None
+        self.parent_gui = None
+        self.members_table = []
+        self.received_JR_guis = []
+        self.neighbors_table = {}
+        self.multihop_neighbor_table = {}
+        self.hop_count = 99999
+        self.set_role(Roles.UNDISCOVERED, reason=f"Node recovered after {downtime:.2f}s downtime")
+        
+        # Start network discovery (use same timing as normal PROBE timer)
+        self.set_timer('TIMER_PROBE', 1)
+    
+    def become_orphan(self, reason=""):
+        """Mark node as orphaned and initiate recovery."""
+        if self.is_failed or self.role == Roles.ROOT:
+            return
+        
+        # Log orphan event
+        log_orphan_event(self.id, self.sim.now, reason, self.parent_gui)
+        
+        if config.ENABLE_RECOVERY_DEBUG:
+            self.log(f"[RECOVERY] Node {self.id} became ORPHAN | Reason: {reason}")
+        
+        # Become unregistered and search for new parent
+        self.become_unregistered()
+        
+        # Mark own children as orphans too
+        for child_addr in list(self.members_table):
+            child_node = self._find_node_by_addr(child_addr)
+            if child_node and not child_node.is_failed:
+                child_node.become_orphan(f"Parent node {self.id} became orphan")
+    
+    def _find_node_by_addr(self, addr):
+        """Find node by network address."""
+        if addr is None:
+            return None
+        for node in ALL_NODES:
+            if node.addr is not None and addr_equals(node.addr, addr):
+                return node
+        return None
 
     
     def become_unregistered(self):
@@ -818,6 +1076,10 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # Ignore packets if node is failed
+        if self.is_failed:
+            return
+        
         dest = pck.get('dest')
         is_final = False
         if pck.get('type') == 'JOIN_REPLY' and pck.get('dest_gui') == self.id:
@@ -1081,6 +1343,20 @@ class SensorNode(wsn.Node):
                 write_neighbor_distances_csv("neighbor_distances.csv")
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
 
+        elif name.startswith('TIMER_NODE_FAILURE_'):
+            # Node failure event
+            self.fail_node()
+            # Schedule recovery
+            for recovery_time, node_id, failure_time in SCHEDULED_RECOVERIES:
+                if node_id == self.id:
+                    recovery_delay = recovery_time - self.sim.now
+                    self.set_timer(f'TIMER_NODE_RECOVERY_{self.id}', recovery_delay)
+                    break
+        
+        elif name.startswith('TIMER_NODE_RECOVERY_'):
+            # Node recovery event
+            self.recover_node()
+
 
 
 ROOT_ID = 1 # 0..count-1
@@ -1219,7 +1495,7 @@ def write_multihop_neighbor_table_csv(path="multihop_neighbor_table.csv"):
                     f"{info['distance']:.6f}"
                 ])
     
-    print(f"Exported multihop neighbor table to {path}")
+    log_to_console_and_file(f"Exported multihop neighbor table to {path}")
 
 ###########################################################
 def create_network(node_class, number_of_nodes=100):
@@ -1262,9 +1538,31 @@ create_network(SensorNode, config.SIM_NODE_COUNT)
 write_node_distances_csv("node_distances.csv")
 write_node_distance_matrix_csv("node_distance_matrix.csv")
 
+# Schedule random node failures if enabled
+if config.ENABLE_NODE_FAILURE_RECOVERY:
+    # Eligible nodes: not ROOT, and prefer nodes that will likely be registered by failure time
+    # We'll pick any non-root node for now, and they'll only fail if registered
+    eligible_nodes = [n for n in ALL_NODES if n.id != ROOT_ID]
+    if len(eligible_nodes) >= config.NUM_NODES_TO_FAIL:
+        selected_nodes = random.sample(eligible_nodes, config.NUM_NODES_TO_FAIL)
+        for i, node in enumerate(selected_nodes):
+            failure_time = config.NODE_FAILURE_START_TIME + i * config.NODE_FAILURE_INTERVAL
+            recovery_time = failure_time + random.uniform(config.NODE_RECOVERY_TIME_MIN, 
+                                                          config.NODE_RECOVERY_TIME_MAX)
+            
+            # Store failure schedule for node to handle
+            SCHEDULED_FAILURES.append((failure_time, node.id))
+            SCHEDULED_RECOVERIES.append((recovery_time, node.id, failure_time))
+            
+            # Schedule the failure timer on the node
+            node.set_timer(f'TIMER_NODE_FAILURE_{node.id}', failure_time)
+            
+            msg = f"📅 Scheduled: Node {node.id} will fail at {failure_time:.1f}s, recover at {recovery_time:.1f}s (downtime: {recovery_time-failure_time:.1f}s)"
+            log_to_console_and_file(msg)
+
 # start the simulation
 sim.run()
-print("Simulation Finished")
+log_to_console_and_file("Simulation Finished")
 
 # Export multihop neighbor table if enabled
 if config.ENABLE_MULTIHOP_DISCOVERY:
@@ -1272,6 +1570,10 @@ if config.ENABLE_MULTIHOP_DISCOVERY:
 
 calculate_and_log_average_join_time()
 calculate_and_log_average_packet_delay()
+if config.ENABLE_NODE_FAILURE_RECOVERY:
+    calculate_and_log_recovery_statistics()
+
+# Close log file AFTER all statistics are written
 close_log_file()
 
 

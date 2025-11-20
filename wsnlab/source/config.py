@@ -53,3 +53,12 @@ ENABLE_TREE_ROUTING = True  # Fall back to tree routing
 
 ## data traffic properties
 DATA_PACKET_INTERVAL = 10  # seconds between random data injections per node
+
+## network recovery properties
+ENABLE_NODE_FAILURE_RECOVERY = True  # Enable random node failures for testing recovery
+NODE_FAILURE_START_TIME = 200  # When to start introducing failures (simulation time)
+NODE_FAILURE_INTERVAL = 100  # Time between random node failures
+NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers
+NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers
+NUM_NODES_TO_FAIL = 3  # Number of random nodes to fail during simulation
+ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
