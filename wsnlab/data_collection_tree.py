@@ -791,8 +791,8 @@ class SensorNode(wsn.Node):
     ###################
     def _init_address_pool(self):
         """Initialize address pool for cluster head - simple and clean."""
-        self.node_addr_pool = {i: None for i in range(1, config.NUM_OF_CHILDREN + 1)}
-        self.log(f"[CLUSTER_SIZE] Node {self.id}: Initialized address pool with {config.NUM_OF_CHILDREN} slots")
+        self.node_addr_pool = {i: None for i in range(1, config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER + 1)}
+        self.log(f"[CLUSTER_SIZE] Node {self.id}: Initialized address pool with {config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER} slots")
     
     def _assign_child_address(self, child_gui):
         """Assign an address to a child node. Returns address or None if cluster is full."""
@@ -802,7 +802,7 @@ class SensorNode(wsn.Node):
                 # Address available - assign it
                 self.node_addr_pool[node_addr] = child_gui
                 child_addr = wsn.Addr(self.ch_addr.net_addr, node_addr)
-                self.log(f"[CLUSTER_SIZE] Node {self.id}: Assigned address {child_addr} to child {child_gui} (slot {node_addr}/{config.NUM_OF_CHILDREN})")
+                self.log(f"[CLUSTER_SIZE] Node {self.id}: Assigned address {child_addr} to child {child_gui} (slot {node_addr}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
                 return child_addr
         
         # No address available - cluster is full
@@ -845,12 +845,28 @@ class SensorNode(wsn.Node):
                 # yield self.timeout(.5)
                 self.send_heart_beat()
             if pck['type'] == 'JOIN_REQUEST':  # it waits and sends join reply message once received join request
-                # Simple cluster size control
+                # Check cluster capacity before accepting new child
                 child_gui = pck.get('gui')
-                child_addr = self._assign_child_address(child_gui)
-                if child_addr is not None:
-                    self.send_join_reply(child_gui, child_addr)
-                # If None, cluster is full - no reply sent, child will retry or choose another parent
+                
+                # Count current children (excluding this child if already in pool)
+                current_children = sum(1 for assigned_gui in self.node_addr_pool.values() 
+                                     if assigned_gui is not None and assigned_gui != child_gui)
+                
+                # Check if cluster has reached max allowed children
+                if current_children >= config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
+                    # Cluster is FULL - reject JOIN_REQUEST (no reply sent)
+                    self.debug_log(config.ENABLE_CLUSTER_DEBUG,
+                                 f"[CLUSTER_SIZE] Node {self.id}: CLUSTER FULL! Cannot accept child {child_gui} "
+                                 f"(current={current_children}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
+                    # No JOIN_REPLY sent → child will timeout and join another cluster
+                else:
+                    # Cluster has space - assign address and send JOIN_REPLY
+                    child_addr = self._assign_child_address(child_gui)
+                    if child_addr is not None:
+                        self.send_join_reply(child_gui, child_addr)
+                    else:
+                        # Should not happen if count is correct, but log for debugging
+                        self.log(f"[CLUSTER_SIZE] Node {self.id}: ERROR - Pool allocation failed for child {child_gui}")
             if pck['type'] == 'NETWORK_REQUEST':  # it sends a network reply to requested node
                 # yield self.timeout(.5)
                 if self.role == Roles.ROOT:
@@ -871,9 +887,9 @@ class SensorNode(wsn.Node):
             if pck['type'] == 'JOIN_ACK':
                 # Add member to list if within capacity
                 member_addr = pck.get('source')
-                if member_addr is not None and len(self.members_table) < config.NUM_OF_CHILDREN:
+                if member_addr is not None and len(self.members_table) < config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
                     self.members_table.append(member_addr)
-                    self.log(f"[MEMBER_TABLE] Node {self.id}: Added member {member_addr} (size={len(self.members_table)}/{config.NUM_OF_CHILDREN})")
+                    self.log(f"[MEMBER_TABLE] Node {self.id}: Added member {member_addr} (size={len(self.members_table)}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
                 elif member_addr is not None:
                     self.log(f"[MEMBER_TABLE] Node {self.id}: REJECTED {member_addr} - members_table FULL")
             if pck['type'] == 'NETWORK_UPDATE':
@@ -918,12 +934,36 @@ class SensorNode(wsn.Node):
                 if config.ENABLE_MULTIHOP_DISCOVERY:
                     self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
                 
-                # Process pending join requests
+                # Process pending join requests (up to max allowed children)
                 self.log(f"[CLUSTER_SIZE] Node {self.id}: Processing {len(self.received_JR_guis)} pending join requests")
+                accepted_count = 0
+                rejected_count = 0
+                
                 for gui in self.received_JR_guis:
-                    child_addr = self._assign_child_address(gui)
-                    if child_addr is not None:
-                        self.send_join_reply(gui, child_addr)
+                    # Check if we've reached max allowed children
+                    current_children = sum(1 for assigned_gui in self.node_addr_pool.values() 
+                                         if assigned_gui is not None)
+                    
+                    if current_children >= config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
+                        # Cluster is full - reject remaining requests
+                        rejected_count += 1
+                        self.debug_log(config.ENABLE_CLUSTER_DEBUG,
+                                     f"[CLUSTER_SIZE] Node {self.id}: REJECTED pending child {gui} - cluster full "
+                                     f"({current_children}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
+                    else:
+                        # Accept child
+                        child_addr = self._assign_child_address(gui)
+                        if child_addr is not None:
+                            self.send_join_reply(gui, child_addr)
+                            accepted_count += 1
+                        else:
+                            rejected_count += 1
+                
+                if rejected_count > 0:
+                    self.log(f"[CLUSTER_SIZE] Node {self.id}: Processed pending requests - accepted={accepted_count}, rejected={rejected_count} (cluster full)")
+                else:
+                    self.log(f"[CLUSTER_SIZE] Node {self.id}: Processed pending requests - accepted={accepted_count}")
+                
                 self.received_JR_guis = []
 
         elif self.role == Roles.UNDISCOVERED:  # if the node is undiscovered
@@ -1000,7 +1040,7 @@ class SensorNode(wsn.Node):
                     # Initialize address pools for ROOT
                     self._init_address_pool()  # For direct children
                     self.cluster_addr_pool = {i: None for i in range(1, config.NUM_OF_CLUSTERS + 1)}  # For cluster IDs (start from 1, ROOT uses 0)
-                    self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Initialized pools - {config.NUM_OF_CHILDREN} child slots, {config.NUM_OF_CLUSTERS} cluster IDs (ROOT uses net_addr=0)")
+                    self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Initialized pools - {config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER} child slots, {config.NUM_OF_CLUSTERS} cluster IDs (ROOT uses net_addr=0)")
                     
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                     # Start neighbor sharing for ROOT

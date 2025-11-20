@@ -12,10 +12,13 @@ NODE_TX_RANGE = 100  # transmission range of nodes (increase coverage for cluste
 NODE_ARRIVAL_MAX = 200  # max time to wake up
 
 ## cluster formation controls
-NUM_OF_CHILDREN = 253  # Maximum nodes per cluster (controls cluster size and topology)
-bits_child = math.ceil(math.log2(NUM_OF_CHILDREN))
+MAX_CHILD_NODES_ALLOWED_PER_CLUSTER = 6  # Maximum child nodes per cluster (controls cluster size and topology)
+bits_child = math.ceil(math.log2(MAX_CHILD_NODES_ALLOWED_PER_CLUSTER))
 bits_cluster = TOTAL_BITS - bits_child
 NUM_OF_CLUSTERS = (1 << bits_cluster) - 1  # Maximum number of clusters
+
+# Legacy alias for backward compatibility
+NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER
 
 
 ## simulation properties
