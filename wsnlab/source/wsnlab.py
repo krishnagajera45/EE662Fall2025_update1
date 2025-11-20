@@ -141,9 +141,6 @@ class Node:
            Returns:
                Node: Created node object.
         """
-        self.power = 21600  # Joules (2 AA batteries: 3.0V * 2.0Ah * 3600 = 21600 J)
-        self.tx_power = config.NODE_DEFAULT_TX_POWER  # transmission power level (dBm)
-        self.tx_current = config.TX_CURRENTS[config.NODE_DEFAULT_TX_POWER]  # current consumption for TX (mA)
         self.pos = pos
         self.tx_range = 0
         self.sim = sim
@@ -225,26 +222,11 @@ class Node:
            Returns:
 
         """
-        ptype = pck.get('type', 'UNKNOWN')
-        
         for (dist, node) in self.neighbor_distance_list:
             if dist <= self.tx_range:
-                # Calculate and deduct energy consumption for TX
-                # Energy = (V * I * 8 * MTU / DATARATE) + overhead (10 µJ)
-                energy_tx = ((self.tx_current * config.VOLTAGE * 8 * config.MTU / config.DATARATE) + 0.01) / 1000  # Convert to Joules
-                self.power -= energy_tx
-                
-                rand_val = random.random()
-                loss_check = rand_val > config.NODE_LOSS_CHANCE
-                
-                if loss_check:  # simulating loss of the packet
-                    if node.can_receive(pck):
-                        prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 >0 else 0.00001
-                        self.delayed_exec(prop_time, node.on_receive_check, pck)
-                else:
-                    if pck['type'] != "HEART_BEAT" and pck['type'] != "NEIGHBOR_INFO_BROADCAST":
-                        self.log("PACKET DROPPED")
-                        self.log(pck)
+                if node.can_receive(pck):
+                    prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 >0 else 0.00001
+                    self.delayed_exec(prop_time, node.on_receive_check, pck)
             else:
                 break
 
@@ -358,10 +340,6 @@ class Node:
 
         """
         if not self.is_sleep:
-            # Calculate and deduct energy consumption for RX
-            # Energy = (V * I * 8 * MTU / DATARATE) + overhead (10 µJ)
-            energy_rx = ((config.RX_CURRENT * config.VOLTAGE * 8 * config.MTU / config.DATARATE) + 0.01) / 1000  # Convert to Joules
-            self.power -= energy_rx
             self.delayed_exec(0.00001, self.on_receive, pck)
 
     ############################
