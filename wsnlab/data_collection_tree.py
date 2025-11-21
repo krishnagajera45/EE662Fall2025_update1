@@ -25,6 +25,14 @@ REGISTRATION_LOG_FILE = "registration_log.csv"
 PACKET_PATH_FILE = "packet_paths.csv"
 DATA_PACKET_COUNTER = 0
 
+# packet loss / channel stats
+PACKET_STATS = {
+    'total_attempts': 0,
+    'total_dropped': 0,
+    'type_attempts': Counter(),
+    'type_dropped': Counter()
+}
+
 # --- recovery tracking ---
 RECOVERY_LOG_FILE = "recovery_events.csv"
 ORPHAN_LOG_FILE = "orphan_events.csv"
@@ -325,6 +333,32 @@ def calculate_and_log_recovery_statistics():
     """Generate recovery statistics report."""
     log_to_console_and_file("")
     log_to_console_and_file("="*70)
+
+
+def log_packet_loss_statistics():
+    """Summarize packet loss counters."""
+    total = PACKET_STATS['total_attempts']
+    dropped = PACKET_STATS['total_dropped']
+    if total == 0:
+        log_to_console_and_file("\n📡 Packet Loss Stats: No packets attempted.")
+        return
+
+    delivered = total - dropped
+    loss_pct = (dropped / total) * 100
+
+    log_to_console_and_file("\n📡 Packet Loss Statistics")
+    log_to_console_and_file(f"   Attempts : {total}")
+    log_to_console_and_file(f"   Delivered: {delivered}")
+    log_to_console_and_file(f"   Dropped  : {dropped} ({loss_pct:.2f}%)")
+
+    if PACKET_STATS['type_attempts']:
+        log_to_console_and_file("   Breakdown by packet type:")
+        for p_type, attempts in PACKET_STATS['type_attempts'].most_common():
+            type_drops = PACKET_STATS['type_dropped'].get(p_type, 0)
+            type_loss = (type_drops / attempts) * 100 if attempts else 0.0
+            log_to_console_and_file(
+                f"      {p_type}: attempts={attempts}, dropped={type_drops} ({type_loss:.2f}%)"
+            )
     log_to_console_and_file("🔧 NETWORK RECOVERY STATISTICS")
     log_to_console_and_file("="*70)
     
@@ -841,6 +875,21 @@ class SensorNode(wsn.Node):
         """Ensure every packet carries a creation timestamp."""
         if 'created_at' not in pck:
             pck['created_at'] = self.now
+
+        p_type = pck.get('type', 'UNKNOWN')
+        PACKET_STATS['total_attempts'] += 1
+        PACKET_STATS['type_attempts'][p_type] += 1
+
+        loss_rate = getattr(config, 'PACKET_LOSS_RATE', 0.0)
+        if loss_rate > 0.0 and random.random() < loss_rate:
+            msg = (f"[LOSS] Node {self.id}: Dropped packet type={pck.get('type')} "
+                   f"dest={pck.get('dest')} rate={loss_rate:.3f}")
+            self.debug_log(getattr(config, 'ENABLE_PACKET_LOSS_DEBUG', False), msg)
+            write_log(self, msg)
+            PACKET_STATS['total_dropped'] += 1
+            PACKET_STATS['type_dropped'][p_type] += 1
+            return  # simulate packet lost on the channel
+
         super().send(pck)
 
     ###################
@@ -851,14 +900,16 @@ class SensorNode(wsn.Node):
 
         dest = pck.get('dest')
         if dest is None:
-            self.debug_log(config.ENABLE_ROUTING_DEBUG, f"[ROUTING] Node {self.id}: Cannot route packet without destination (type={pck.get('type')})")
+            self.debug_log(
+                config.ENABLE_ROUTING_DEBUG,
+                f"[ROUTING] Node {self.id}: Cannot route packet without destination (type={pck.get('type')})"
+            )
             write_log(self, f"ROUTE_FAIL type={pck.get('type')} reason=no_dest")
             return
 
         route_trace = pck.setdefault('route_trace', [])
         if not route_trace or route_trace[-1] != self.id:
             route_trace.append(self.id)
-
         # Deliver to self if addressed directly
         if self.addr is not None and dest == self.addr:
             pck['next_hop'] = dest
@@ -1572,6 +1623,7 @@ calculate_and_log_average_join_time()
 calculate_and_log_average_packet_delay()
 if config.ENABLE_NODE_FAILURE_RECOVERY:
     calculate_and_log_recovery_statistics()
+log_packet_loss_statistics()
 
 # Close log file AFTER all statistics are written
 close_log_file()
