@@ -1072,29 +1072,27 @@ class SensorNode(wsn.Node):
     ###################
     def send_random_data_packet(self):
         """Pick a random destination node and trace the routed path."""
-        if self.addr is None:
+        if self.addr is None or self.id == ROOT_ID:
             return
-        eligible = [node for node in ALL_NODES
-                    if hasattr(node, 'addr') and node.addr is not None and node.id != self.id]
-        if not eligible:
+        root_node = next((n for n in ALL_NODES if n.id == ROOT_ID and getattr(n, "addr", None)), None)
+        if root_node is None or self.root_addr is None:
             self.debug_log(config.ENABLE_ROUTING_DEBUG,
-                           f"[DATA] Node {self.id}: No eligible destinations for SENSOR_DATA")
+                           f"[DATA] Node {self.id}: Root not ready for SENSOR_DATA deliveries")
             return
 
-        dest_node = random.choice(eligible)
         packet_id = next_packet_id()
         pck = {
             'packet_id': packet_id,
             'type': 'SENSOR_DATA',
             'source': self.addr,
             'source_gui': self.id,
-            'dest': dest_node.addr,
-            'dest_gui': dest_node.id,
+            'dest': root_node.addr,
+            'dest_gui': root_node.id,
             'sensor_value': random.uniform(0, 100),
             'route_trace': [self.id],
         }
         self.debug_log(config.ENABLE_ROUTING_DEBUG,
-                       f"[DATA] Node {self.id}: Sending packet#{packet_id} to Node {dest_node.id}")
+                       f"[DATA] Node {self.id}: Sending packet#{packet_id} to ROOT Node {root_node.id}")
         self.route_and_forward_package(pck)
 
     ###################
@@ -1225,8 +1223,8 @@ class SensorNode(wsn.Node):
                 # Avoid duplicates in received_JR_guis
                 if pck['gui'] not in self.received_JR_guis:
                     self.received_JR_guis.append(pck['gui'])
-                # yield self.timeout(.5)
-                self.send_network_request()
+                    # yield self.timeout(.5)
+                    self.send_network_request()
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
                 self.set_role(Roles.CLUSTER_HEAD)
                 self.members_table = []
