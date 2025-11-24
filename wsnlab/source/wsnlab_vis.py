@@ -73,7 +73,9 @@ class Node(wsnlab.Node):
            Returns:
 
         """
-        obj_id =self.scene.circle(self.pos[0], self.pos[1], self.tx_range, line="wsnsimpy:tx")
+        # Store circle ID for later deletion (e.g., when becoming router)
+        obj_id = self.scene.circle(self.pos[0], self.pos[1], self.tx_range, line="wsnsimpy:tx")
+        self.tx_range_circle_id = obj_id
         #self.delayed_exec(0.2, self.scene.delshape, obj_id)
 
 
