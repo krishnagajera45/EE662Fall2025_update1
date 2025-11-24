@@ -419,7 +419,7 @@ def log_packet_loss_statistics():
     log_to_console_and_file("="*70)
 
 
-Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD')
+Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD ROUTER')
 """Enumeration of roles"""
 
 ###########################################################
@@ -453,6 +453,7 @@ class SensorNode(wsn.Node):
         self.root_addr = None
         self.wake_up_time = None
         self.registered_time = None
+        self.tx_range_circle_id = None  # Initialize TX range circle ID for visualization
         self.set_role(Roles.UNDISCOVERED)
         self.is_root_eligible = True if self.id == ROOT_ID else False
         self.c_probe = 0  # c means counter and probe is the name of counter
@@ -466,7 +467,11 @@ class SensorNode(wsn.Node):
         
         # Address pool for cluster size control (simple and clean)
         self.node_addr_pool = {}  # {node_addr: gui or None} - pool of available addresses for children
-        self.cluster_addr_pool = {}  # {cluster_id: source or None} - pool of cluster IDs (ROOT only)
+        self.cluster_addr_pool = {}
+        
+        # Proactive CH creation state
+        self.failed_join_attempts = 0  # Count of failed join attempts for UNREGISTERED nodes
+        self.registered_since = None  # Time when node became REGISTERED (for proactive CH creation)  # {cluster_id: source or None} - pool of cluster IDs (ROOT only)
         
         # Multi-hop neighbor discovery
         self.multihop_neighbor_table = {}  # {neighbor_gui: {'hop_dist': int, 'next_hop': gui, 'distance': float}}
@@ -476,6 +481,30 @@ class SensorNode(wsn.Node):
         self.failure_time = None
         self.role_before_failure = None
         self.children_before_failure = []
+        
+        # Router/CH transfer state (for overlap reduction)
+        self.ch_transfer_enabled = getattr(config, 'ENABLE_CH_TRANSFER', True)
+        self.ch_transfer_in_progress = False
+        self.ch_transfer_candidate = None  # GUI of node being transferred to
+        
+        # Proactive CH creation state
+        self.failed_join_attempts = 0  # Count of failed join attempts for UNREGISTERED nodes
+        self.registered_since = None  # Time when node became REGISTERED (for proactive CH creation)
+        
+        # Rate limiting for JOIN_REPLY resends (prevent spam loops)
+        self.join_reply_last_sent = {}  # {child_gui: last_sent_time}
+        self.join_reply_cooldown = 5.0  # Minimum seconds between resends
+        
+        # Rate limiting for JOIN_REQUEST sends (prevent spam)
+        self.last_join_request_sent_time = None  # timestamp of last JOIN_REQUEST
+        self.join_request_cooldown = 20  # seconds between JOIN_REQUEST sends
+        
+        # Rate limiting for TRIGGER_CH_CREATION sends (prevent spam)
+        self.last_trigger_ch_creation_time = None  # Timestamp of last TRIGGER_CH_CREATION sent
+        self.trigger_ch_creation_cooldown = 60.0  # Cooldown period for TRIGGER_CH_CREATION (seconds) - prevent spam
+        
+        # Track heartbeat timer for ROUTER nodes
+        self.heartbeat_timer_active = False
 
     ###################
     def run(self):
@@ -523,8 +552,225 @@ class SensorNode(wsn.Node):
                 self.draw_tx_range()
             elif new_role == Roles.ROOT:
                 self.scene.nodecolor(self.id, 0, 0, 0)
+                self.draw_tx_range()  # ROOT should also draw its TX range
                 self.set_timer('TIMER_EXPORT_CH_CSV', config.EXPORT_CH_CSV_INTERVAL)
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
+            elif new_role == Roles.ROUTER:
+                # Magenta/pink color to distinguish from CH (blue)
+                self.scene.nodecolor(self.id, 1, 0, 0.75)
+                # Remove TX range circle when becoming router
+                if hasattr(self, 'tx_range_circle_id') and self.tx_range_circle_id is not None:
+                    try:
+                        self.scene.delshape(self.tx_range_circle_id)
+                        self.tx_range_circle_id = None
+                    except:
+                        pass
+
+    ###################
+    # Router and CH Transfer Methods (for overlap reduction)
+    ###################
+    
+    def become_router(self, reason="CH role transferred"):
+        """Convert this node from CLUSTER_HEAD to ROUTER.
+        Router acts as a bridge between cluster heads, forwarding packets.
+        """
+        if self.role != Roles.CLUSTER_HEAD or self.id == ROOT_ID:
+            return  # Only CHs can become routers, and ROOT never becomes router
+        
+        prev_ch_addr = self.ch_addr
+        self.ch_addr = None  # Router doesn't have its own cluster
+        self.set_role(Roles.ROUTER, reason=reason)
+        
+        # CRITICAL: ROUTER nodes must send periodic HEART_BEAT so UNREGISTERED nodes can discover them
+        # This allows UNREGISTERED nodes to join the network through routers
+        if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+            self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+            self.heartbeat_timer_active = True
+        
+        if config.ENABLE_CLUSTER_DEBUG:
+            self.log(f"[ROUTER] Node {self.id} became ROUTER (prev_ch={format_addr(prev_ch_addr)})")
+            write_log(self, f"[ROUTER] Node {self.id} activated as router")
+    
+    def find_farthest_member(self):
+        """
+        Find the farthest registered member from this CLUSTER_HEAD.
+        This member will be nominated to become the new CH to reduce overlap.
+        Returns (member_gui, member_addr, distance) or (None, None, -1) if no candidate.
+        """
+        if self.role != Roles.CLUSTER_HEAD or len(self.members_table) == 0:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: Cannot find candidate - role={self.role}, members={len(self.members_table)}")
+            return None, None, -1
+        
+        # Convert member addresses to hashable keys for set operations
+        member_addr_keys = {addr_key(addr) for addr in self.members_table if addr is not None}
+        best_gui, best_addr, best_dist = None, None, -1.0
+        candidates_checked = 0
+        members_without_neighbor_info = []
+        
+        # First, try to find members in neighbors_table with distance info
+        for neighbor_gui, neighbor_info in self.neighbors_table.items():
+            neighbor_addr = neighbor_info.get('addr')
+            
+            # Must be a registered member - use addr_key for comparison
+            if addr_key(neighbor_addr) not in member_addr_keys:
+                continue
+            
+            candidates_checked += 1
+            
+            # Never transfer to ROOT
+            if neighbor_gui == ROOT_ID:
+                continue
+            
+            # Must have distance information
+            distance = neighbor_info.get('distance')
+            if distance is None:
+                if config.ENABLE_CLUSTER_DEBUG:
+                    self.log(f"[CH_TRANSFER] Node {self.id}: Neighbor {neighbor_gui} has no distance info")
+                continue
+            
+            # Choose the farthest member to push CH outward
+            if distance > best_dist:
+                best_gui = neighbor_gui
+                best_addr = neighbor_addr
+                best_dist = distance
+        
+        # If no candidate found in neighbors_table, try to find member by address
+        # This handles cases where member joined but hasn't sent heartbeat yet
+        if best_gui is None and len(self.members_table) > 0:
+            # Find any member address and try to locate the node
+            for member_addr in self.members_table:
+                member_node = self._find_node_by_addr(member_addr)
+                if member_node and member_node.id != ROOT_ID and member_node.id != self.id:
+                    # Calculate distance if we have positions
+                    if self.id in NODE_POS and member_node.id in NODE_POS:
+                        x1, y1 = NODE_POS[self.id]
+                        x2, y2 = NODE_POS[member_node.id]
+                        distance = math.hypot(x1 - x2, y1 - y2)
+                        if distance > best_dist:
+                            best_gui = member_node.id
+                            best_addr = member_addr
+                            best_dist = distance
+                            members_without_neighbor_info.append((member_node.id, distance))
+        
+        if config.ENABLE_CLUSTER_DEBUG:
+            if best_gui is None:
+                self.log(f"[CH_TRANSFER] Node {self.id}: No suitable candidate found (checked {candidates_checked} in neighbors_table, {len(self.members_table)} total members)")
+            else:
+                source = "neighbors_table" if candidates_checked > 0 else "position_calculation"
+                self.log(f"[CH_TRANSFER] Node {self.id}: Found candidate {best_gui} at distance {best_dist:.1f}m (from {source})")
+        
+        return best_gui, best_addr, best_dist
+    
+    def _trigger_ch_creation(self):
+        """
+        Trigger nearby REGISTERED nodes to become cluster heads.
+        Sends TRIGGER_CH_CREATION message to REGISTERED neighbors via broadcast.
+        Rate-limited to prevent spam.
+        """
+        if self.role != Roles.UNREGISTERED:
+            return
+        
+        # Rate limiting: Don't send TRIGGER_CH_CREATION too frequently
+        if self.last_trigger_ch_creation_time is not None:
+            time_since_last = self.now - self.last_trigger_ch_creation_time
+            if time_since_last < self.trigger_ch_creation_cooldown:
+                if config.ENABLE_CLUSTER_DEBUG:
+                    self.log(f"[CH_CREATION] Node {self.id}: Rate-limiting TRIGGER_CH_CREATION (last sent {time_since_last:.1f}s ago, cooldown={self.trigger_ch_creation_cooldown}s)")
+                return
+        
+        # Find REGISTERED neighbors - use broadcast since UNREGISTERED nodes don't have addresses
+        found_registered = False
+        for neighbor_gui, neighbor_info in self.neighbors_table.items():
+            neighbor_role = neighbor_info.get('role')
+            if neighbor_role == Roles.REGISTERED:
+                found_registered = True
+                # Use broadcast to reach REGISTERED neighbors (they'll filter by type)
+                trigger_pck = {
+                    'dest': wsn.BROADCAST_ADDR,  # Broadcast so REGISTERED nodes can receive it
+                    'type': 'TRIGGER_CH_CREATION',
+                    'source': self.addr if self.addr else wsn.BROADCAST_ADDR,
+                    'gui': self.id,
+                    'target_gui': neighbor_gui  # Specify which neighbor we want to trigger
+                }
+                # Use direct send instead of route_and_forward_package since we're broadcasting
+                self.send(trigger_pck)
+                self.last_trigger_ch_creation_time = self.now  # Update timestamp
+                self.log(f"[CH_CREATION] Node {self.id}: Sent TRIGGER_CH_CREATION broadcast (target REGISTERED neighbor {neighbor_gui})")
+                break  # Only trigger one neighbor to avoid multiple CHs
+        
+        if not found_registered:
+            # No REGISTERED neighbors - send general broadcast hoping any REGISTERED node will respond
+            trigger_pck = {
+                'dest': wsn.BROADCAST_ADDR,
+                'type': 'TRIGGER_CH_CREATION',
+                'source': self.addr if self.addr else wsn.BROADCAST_ADDR,
+                'gui': self.id,
+                'target_gui': None  # No specific target - any REGISTERED node can respond
+            }
+            self.send(trigger_pck)
+            self.last_trigger_ch_creation_time = self.now  # Update timestamp
+            self.log(f"[CH_CREATION] Node {self.id}: Sent TRIGGER_CH_CREATION broadcast (no REGISTERED neighbors in table, hoping any REGISTERED node responds)")
+    
+    def initiate_ch_transfer(self):
+        """
+        Initiate CH role transfer to reduce cluster overlap.
+        Finds the farthest member and sends them a CH_TRANSFER message.
+        """
+        if not self.ch_transfer_enabled:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: Transfer disabled")
+            return
+        
+        if self.ch_transfer_in_progress:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: Transfer already in progress")
+            return
+        
+        if self.role != Roles.CLUSTER_HEAD:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: Not a CLUSTER_HEAD (role={self.role})")
+            return
+        
+        if self.ch_addr is None:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: No ch_addr")
+            return
+        
+        # Need at least one member to transfer to
+        min_members = getattr(config, 'MIN_MEMBERS_FOR_TRANSFER', 1)
+        if len(self.members_table) < min_members:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: Not enough members ({len(self.members_table)} < {min_members})")
+            return
+        
+        # Find farthest member
+        candidate_gui, candidate_addr, candidate_dist = self.find_farthest_member()
+        
+        if candidate_gui is None:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[CH_TRANSFER] Node {self.id}: No candidate found (members={len(self.members_table)})")
+            return  # No suitable candidate found
+        
+        # Mark transfer as in progress
+        self.ch_transfer_in_progress = True
+        self.ch_transfer_candidate = candidate_gui
+        
+        # Send CH_TRANSFER message to candidate
+        transfer_pck = {
+            'dest': candidate_addr,
+            'type': 'CH_TRANSFER',
+            'source': self.addr,
+            'gui': self.id,
+            'new_ch_addr': self.ch_addr,  # The CH address to adopt
+            'prev_ch_addr': self.ch_addr
+        }
+        
+        # Use routing to ensure packet reaches destination
+        self.route_and_forward_package(transfer_pck)
+        
+        self.log(f"[CH_TRANSFER] Node {self.id} transferring CH role to node {candidate_gui} (dist={candidate_dist:.1f}m, addr={format_addr(candidate_addr)})")
+        write_log(self, f"[CH_TRANSFER] Initiating transfer from CH {self.id} to member {candidate_gui} (dist={candidate_dist:.1f}m)")
 
     ###################
     # Node Failure and Recovery Methods
@@ -637,6 +883,15 @@ class SensorNode(wsn.Node):
             if node.addr is not None and addr_equals(node.addr, addr):
                 return node
         return None
+    
+    def _find_node_by_gui(self, gui):
+        """Find node by GUI ID."""
+        if gui is None:
+            return None
+        for node in ALL_NODES:
+            if node.id == gui:
+                return node
+        return None
 
     
     def become_unregistered(self):
@@ -658,6 +913,8 @@ class SensorNode(wsn.Node):
         self.child_networks_table = {}
         self.members_table = []
         self.received_JR_guis = []  # keeps received Join Request global unique ids
+        self.failed_join_attempts = 0  # Reset failed attempts when becoming UNREGISTERED
+        self.last_trigger_ch_creation_time = None  # Track when we last sent TRIGGER_CH_CREATION
         self.send_probe()
         self.set_timer('TIMER_JOIN_REQUEST', 20)
 
@@ -672,11 +929,55 @@ class SensorNode(wsn.Node):
             x2, y2 = NODE_POS[neighbor_entry['gui']]
             neighbor_entry['distance'] = math.hypot(x1 - x2, y1 - y2)
         neighbor_entry['mesh_hop_distance'] = 1
-        self.neighbors_table[neighbor_entry['gui']] = neighbor_entry
+        
+        neighbor_gui = neighbor_entry['gui']
+        old_entry = self.neighbors_table.get(neighbor_gui)
+        self.neighbors_table[neighbor_gui] = neighbor_entry
 
-        if neighbor_entry['gui'] not in self.child_networks_table.keys():
-            if neighbor_entry['gui'] not in self.candidate_parents_table:
-                self.candidate_parents_table.append(neighbor_entry['gui'])
+        # Only add to candidate_parents_table if:
+        # 1. Not in child_networks_table (not our child)
+        # 2. Has a valid role that can be a parent (REGISTERED, CLUSTER_HEAD, ROUTER, or ROOT)
+        # 3. Not already in candidate_parents_table
+        # 4. Has a valid address (can accept JOIN_REQUESTs)
+        neighbor_role = neighbor_entry.get('role')
+        # For address, prefer 'source' (CH address or node address) as that's what we'll send JOIN_REQUEST to
+        # For ROUTER nodes, they might not have ch_addr, so use 'addr' (their node address)
+        # Fall back to 'ch_addr' if 'source' and 'addr' are not available
+        neighbor_addr = neighbor_entry.get('source') or neighbor_entry.get('addr') or neighbor_entry.get('ch_addr')
+        
+        # Check if role is valid - handle both Enum and string comparisons
+        # CRITICAL: Only CLUSTER_HEAD, ROUTER, and ROOT can be parents
+        # REGISTERED nodes cannot accept children until they become CLUSTER_HEAD
+        valid_roles = (Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT)
+        has_valid_role = (neighbor_role in valid_roles) if neighbor_role is not None else False
+        has_valid_addr = (neighbor_addr is not None)
+        can_be_parent = has_valid_role and has_valid_addr
+        
+        if neighbor_gui not in self.child_networks_table.keys():
+            # Check if this neighbor was previously rejected but now has valid role
+            was_in_candidates = neighbor_gui in self.candidate_parents_table
+            
+            if can_be_parent:
+                # Add to candidate_parents_table if not already there
+                if neighbor_gui not in self.candidate_parents_table:
+                    self.candidate_parents_table.append(neighbor_gui)
+                    if self.role in (Roles.UNDISCOVERED, Roles.UNREGISTERED):
+                        write_log(self, f"[JOIN] Node {self.id}: Added candidate parent {neighbor_gui} (role={neighbor_role}, addr={format_addr(neighbor_addr)})")
+                elif old_entry and old_entry.get('role') != neighbor_role:
+                    # Role changed - log it for debugging
+                    if self.role in (Roles.UNDISCOVERED, Roles.UNREGISTERED):
+                        write_log(self, f"[JOIN] Node {self.id}: Candidate parent {neighbor_gui} role updated {old_entry.get('role')} -> {neighbor_role}")
+            elif not can_be_parent and config.ENABLE_CLUSTER_DEBUG and self.role in (Roles.UNDISCOVERED, Roles.UNREGISTERED):
+                # Debug why neighbor can't be parent
+                reason = []
+                if not has_valid_role:
+                    reason.append(f"invalid_role={neighbor_role} (type={type(neighbor_role).__name__})")
+                if not has_valid_addr:
+                    reason.append("no_addr")
+                # Log every time we reject a neighbor if we have no candidates (helps debug)
+                # But limit logging to avoid spam - only log first few rejections
+                if reason and len(self.candidate_parents_table) == 0 and len(self.neighbors_table) <= 5:
+                    write_log(self, f"[JOIN] Node {self.id}: Neighbor {neighbor_gui} cannot be parent ({', '.join(reason)}, entry_keys={list(neighbor_entry.keys())})")
         
         # Add to multihop neighbor table as 1-hop neighbor
         if config.ENABLE_MULTIHOP_DISCOVERY:
@@ -700,8 +1001,8 @@ class SensorNode(wsn.Node):
     def process_neighbor_share(self, pck):
         """Process neighbor info shared by neighbors (Distance Vector style)"""
         if not config.ENABLE_MULTIHOP_DISCOVERY:
-            return
-        
+                        return
+
         sender_gui = pck['gui']
         neighbors_info = pck.get('neighbors_info', {})
         
@@ -746,24 +1047,58 @@ class SensorNode(wsn.Node):
 
     ###################
     def select_and_join(self):
+        # Don't send JOIN_REQUEST if already registered
+        if self.role in (Roles.REGISTERED, Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT):
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[JOIN] Node {self.id}: Skipping select_and_join - already {self.role}")
+            return
+        
+        if len(self.candidate_parents_table) == 0:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[JOIN] Node {self.id}: No candidate parents available")
+            return
+        
         min_hop = 99999
         min_hop_gui = 99999
         for gui in self.candidate_parents_table:
             neighbor_info = self.neighbors_table.get(gui)
             if neighbor_info is None:
                 continue
+            # Only consider neighbors that can actually be parents (have valid roles)
+            # CRITICAL: Only CLUSTER_HEAD, ROUTER, and ROOT can accept children
+            neighbor_role = neighbor_info.get('role')
+            valid_roles = (Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT)
+            if neighbor_role not in valid_roles:
+                continue
             hop_count = neighbor_info.get('hop_count', 99999)
             if hop_count < min_hop or (hop_count == min_hop and gui < min_hop_gui):
                 min_hop = hop_count
                 min_hop_gui = gui
+        
         if min_hop_gui == 99999:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[JOIN] Node {self.id}: No valid candidate found (checked {len(self.candidate_parents_table)} candidates)")
             return
+        
         selected_entry = self.neighbors_table[min_hop_gui]
+        # Try 'source' first (CH address or node address), then 'ch_addr', then 'addr'
         selected_addr = selected_entry.get('source')
         if selected_addr is None:
+            selected_addr = selected_entry.get('ch_addr')
+        if selected_addr is None:
+            selected_addr = selected_entry.get('addr')
+        
+        if selected_addr is None:
+            if config.ENABLE_CLUSTER_DEBUG:
+                self.log(f"[JOIN] Node {self.id}: Selected candidate {min_hop_gui} has no address (entry keys: {list(selected_entry.keys())})")
             return
+        
+        if config.ENABLE_CLUSTER_DEBUG:
+            self.log(f"[JOIN] Node {self.id}: Selected parent {min_hop_gui} (hop={min_hop}, addr={format_addr(selected_addr)})")
+        
         self.send_join_request(selected_addr)
-        self.set_timer('TIMER_JOIN_REQUEST', 5)
+        # Don't set timer here - let TIMER_JOIN_REQUEST handler manage the timer
+        # This prevents duplicate timer scheduling
 
 
     ###################
@@ -840,7 +1175,14 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # Rate limiting is now handled in TIMER_JOIN_REQUEST handler
+        # Just send the JOIN_REQUEST (rate limit check already done)
+        # Update timestamp BEFORE sending to ensure rate limit works correctly
+        old_time = self.last_join_request_sent_time
+        self.last_join_request_sent_time = self.now
         self.send({'dest': dest, 'type': 'JOIN_REQUEST', 'gui': self.id})
+        if config.ENABLE_CLUSTER_DEBUG:
+            write_log(self, f"[JOIN] Node {self.id}: Sent JOIN_REQUEST to {format_addr(dest)}")
 
     ###################
     def send_join_reply(self, gui, addr):
@@ -872,7 +1214,7 @@ class SensorNode(wsn.Node):
 
     ###################
     def send(self, pck):
-        """Ensure every packet carries a creation timestamp."""
+        """Ensure every packet carries a creation timestamp and prevent routing loops."""
         if 'created_at' not in pck:
             pck['created_at'] = self.now
 
@@ -890,6 +1232,84 @@ class SensorNode(wsn.Node):
             PACKET_STATS['type_dropped'][p_type] += 1
             return  # simulate packet lost on the channel
 
+        # CRITICAL: Prevent routing loops while trusting routing decisions
+        # If routing has determined a specific next_hop, trust that decision
+        route_trace = pck.get('route_trace', [])
+        next_hop = pck.get('next_hop')
+        dest = pck.get('dest')
+        
+        # CRITICAL: If packet is for ourselves (dest == self.addr or next_hop == self.addr), don't send
+        # The packet is already being processed in on_receive(), sending it again would create a loop
+        if self.addr is not None:
+            if addr_equals(dest, self.addr) or addr_equals(next_hop, self.addr):
+                if config.ENABLE_ROUTING_DEBUG:
+                    self.log(f"[ROUTING] Node {self.id}: Packet for self (dest={format_addr(dest)}, next_hop={format_addr(next_hop)}), not sending to prevent loop")
+                return
+        
+        # Check if dest is broadcast
+        is_broadcast = False
+        if dest is not None and hasattr(dest, 'is_equal'):
+            is_broadcast = dest.is_equal(wsn.BROADCAST_ADDR)
+        
+        # If we have a specific next_hop (not broadcast), trust the routing decision
+        # Only filter by route_trace for broadcasts or when next_hop is not specific
+        has_specific_next_hop = (next_hop is not None and 
+                                not is_broadcast and 
+                                (not hasattr(next_hop, 'is_equal') or not next_hop.is_equal(wsn.BROADCAST_ADDR)))
+        
+        if has_specific_next_hop and route_trace:
+            # Trust routing decision: send to nodes matching next_hop even if in route_trace
+            # This allows packets to reach their intended destination even if it was in the path
+            sent = False
+            for (dist, node) in self.neighbor_distance_list:
+                if dist <= self.tx_range:
+                    # CRITICAL: Don't send to ourselves (prevents infinite loop)
+                    if node.id == self.id:
+                        continue
+                    if node.can_receive(pck):
+                        # Check if this node matches the next_hop address
+                        if node.addr is not None and addr_equals(node.addr, next_hop):
+                            # Found the intended recipient - send even if in route_trace
+                            prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 > 0 else 0.00001
+                            self.delayed_exec(prop_time, node.on_receive_check, pck)
+                            sent = True
+                            if config.ENABLE_ROUTING_DEBUG and node.id in route_trace:
+                                self.log(f"[ROUTING] Node {self.id}: Sending to intended next_hop {node.id} (in route_trace but routing decision trusted)")
+                            break  # Only send to first matching node
+                else:
+                    break
+            if not sent:
+                if config.ENABLE_ROUTING_DEBUG:
+                    self.log(f"[ROUTING] Node {self.id}: Intended next_hop {format_addr(next_hop)} not found in neighbors")
+            return
+        
+        # For broadcasts or packets without specific next_hop, filter by route_trace
+        if route_trace and not is_broadcast:
+            filtered_neighbors = []
+            for (dist, node) in self.neighbor_distance_list:
+                if dist <= self.tx_range:
+                    # Skip nodes already in route_trace (prevent loops)
+                    if node.id in route_trace:
+                        if config.ENABLE_ROUTING_DEBUG:
+                            self.log(f"[ROUTING] Node {self.id}: Skipping neighbor {node.id} - already in route_trace {route_trace}")
+                        continue
+                    # Check if this node can receive the packet
+                    if node.can_receive(pck):
+                        filtered_neighbors.append((dist, node))
+                else:
+                    break
+            
+            # Send only to filtered neighbors
+            if filtered_neighbors:
+                for (dist, node) in filtered_neighbors:
+                    prop_time = dist / 1000000 - 0.00001 if dist / 1000000 - 0.00001 > 0 else 0.00001
+                    self.delayed_exec(prop_time, node.on_receive_check, pck)
+            else:
+                if config.ENABLE_ROUTING_DEBUG:
+                    self.log(f"[ROUTING] Node {self.id}: No valid neighbors (all in route_trace {route_trace})")
+            return
+
+        # For broadcast packets or packets without route_trace, use normal send
         super().send(pck)
 
     ###################
@@ -909,15 +1329,47 @@ class SensorNode(wsn.Node):
             write_log(self, f"ROUTE_FAIL type={pck.get('type')} reason=no_dest")
             return
 
+        # CRITICAL: Broadcast packets should NOT be routed - deliver locally only
+        if dest is not None and hasattr(dest, 'is_equal'):
+            if dest.is_equal(wsn.BROADCAST_ADDR):
+                # Broadcast packets are delivered locally, not routed
+                # Don't log every broadcast to avoid spam - only log if routing debug is enabled
+                if config.ENABLE_ROUTING_DEBUG:
+                    pck['next_hop'] = dest
+                    self._record_route(pck, 'LOCAL_BROADCAST', dest)
+                # Broadcast packets should be processed locally, not sent again
+                # The packet was already received via on_receive, so we just return
+                return
+
         route_trace = pck.setdefault('route_trace', [])
+        
+        # Add self to route trace first (for new packets)
         if not route_trace or route_trace[-1] != self.id:
             route_trace.append(self.id)
+        
+        # Loop detection: if packet has visited this node MORE THAN ONCE, drop it
+        # (Allow first visit, but detect if we're revisiting)
+        visit_count = route_trace.count(self.id)
+        if visit_count > 1:
+            if config.ENABLE_ROUTING_DEBUG:
+                self.log(f"[ROUTING] Node {self.id}: Dropping packet - loop detected (visited {visit_count} times, trace: {route_trace})")
+            write_log(self, f"ROUTE_FAIL type={pck.get('type')} reason=loop")
+            return
+        
+        # Limit route trace length to prevent memory issues
+        if len(route_trace) > 20:
+            if config.ENABLE_ROUTING_DEBUG:
+                self.log(f"[ROUTING] Node {self.id}: Dropping packet - too many hops ({len(route_trace)})")
+            write_log(self, f"ROUTE_FAIL type={pck.get('type')} reason=too_many_hops")
+            return
 
         # Deliver to self if addressed directly
-        if self.addr is not None and dest == self.addr:
+        # CRITICAL: Don't call self.send() here - packet is already being processed in on_receive()
+        # Calling self.send() would broadcast it to neighbors, creating a routing loop
+        if self.addr is not None and addr_equals(dest, self.addr):
             pck['next_hop'] = dest
             self._record_route(pck, 'LOCAL_SELF', dest)
-            self.send(pck)
+            # Packet is already in on_receive(), so just return - don't send it again
             return
 
         path_str = "UNKNOWN"  # default
@@ -947,10 +1399,17 @@ class SensorNode(wsn.Node):
                         path_str = f"MESH_{multihop_match.get('hop_dist', 2)}H"
                         self._record_route(pck, path_str, next_addr)
                         self.send(pck)
-                        return
+                    return
 
         # STEP 3: MESH ROUTING - Direct neighbor (1-hop)
         if neighbor_match:
+            # CRITICAL: Don't route to ourselves
+            if addr_equals(dest, self.addr):
+                # Packet is for ourselves - already being processed, don't route
+                if config.ENABLE_ROUTING_DEBUG:
+                    self.log(f"[ROUTING] Node {self.id}: Mesh routing detected packet for self, not routing")
+                return
+            
             # Mesh routing if neighbor_hop_count > 1, else direct
             if neighbor_match.get('neighbor_hop_count', 1) > 1:
                 next_hop_gui = neighbor_match.get('next_hop')
@@ -965,11 +1424,14 @@ class SensorNode(wsn.Node):
                 else:
                     pck['next_hop'] = dest
                     path_str = "MESH"
-            else:
+            else:  # Direct 1-hop neighbor
                 pck['next_hop'] = dest
                 path_str = "DIRECT"
-            self._record_route(pck, path_str, pck['next_hop'])
-            self.send(pck)
+            
+            # CRITICAL: Don't send to ourselves (prevents infinite loop)
+            if not addr_equals(pck.get('next_hop'), self.addr):
+                self._record_route(pck, path_str, pck['next_hop'])
+                self.send(pck)
             return
 
         # STEP 4: TREE ROUTING - Check if destination is in members_table (cluster member)
@@ -1092,7 +1554,7 @@ class SensorNode(wsn.Node):
                            f"[ROUTING] Node {self.id}: Cannot send NETWORK_REQUEST - addr not assigned")
             write_log(self, "ROUTE_FAIL type=NETWORK_REQUEST reason=no_addr")
             return
-        self.route_and_forward_package({'dest': self.root_addr, 'type': 'NETWORK_REQUEST', 'source': self.addr})
+        self.route_and_forward_package({'dest': self.root_addr, 'type': 'NETWORK_REQUEST', 'source': self.addr, 'gui': self.id})
 
     ###################
     def send_network_reply(self, dest, addr):
@@ -1151,7 +1613,7 @@ class SensorNode(wsn.Node):
             'dest': root_node.addr,
             'dest_gui': root_node.id,
             'sensor_value': random.uniform(0, 100),
-            'route_trace': [self.id],
+            'route_trace': [],  # Don't pre-initialize - let route_and_forward_package add self.id
         }
         self.debug_log(config.ENABLE_ROUTING_DEBUG,
                        f"[DATA] Node {self.id}: Sending packet#{packet_id} to ROOT Node {root_node.id}")
@@ -1207,7 +1669,18 @@ class SensorNode(wsn.Node):
             record_packet_path(pck, self)
 
         if self.role == Roles.ROOT or self.role == Roles.CLUSTER_HEAD:  # if the node is root or cluster head
-            if 'next_hop' in pck.keys() and pck['dest'] != self.addr and pck['dest'] != self.ch_addr:  # forwards message if destination is not itself
+            # Use safe address comparison
+            dest = pck.get('dest')
+            
+            # CRITICAL: Broadcast packets should NEVER be forwarded - process locally only
+            is_broadcast = False
+            if dest is not None and hasattr(dest, 'is_equal'):
+                is_broadcast = dest.is_equal(wsn.BROADCAST_ADDR)
+            
+            is_for_self = addr_equals(dest, self.addr) or addr_equals(dest, self.ch_addr)
+            
+            # Only forward non-broadcast packets that are not for self
+            if not is_broadcast and 'next_hop' in pck.keys() and not is_for_self:  # forwards message if destination is not itself
                 self.route_and_forward_package(pck)
                 return
             if pck['type'] == 'HEART_BEAT':
@@ -1221,9 +1694,40 @@ class SensorNode(wsn.Node):
                 # Check cluster capacity before accepting new child
                 child_gui = pck.get('gui')
                 
-                # Count current children (excluding this child if already in pool)
+                # CRITICAL: Check if this child already has an address assigned (prevent duplicate processing)
+                child_already_assigned = any(assigned_gui == child_gui for assigned_gui in self.node_addr_pool.values())
+                if child_already_assigned:
+                    # Check if child is already REGISTERED (if so, it shouldn't be sending JOIN_REQUEST)
+                    child_node = self._find_node_by_gui(child_gui)
+                    if child_node and child_node.role in (Roles.REGISTERED, Roles.CLUSTER_HEAD, Roles.ROUTER):
+                        # Child is already registered - ignore this JOIN_REQUEST (shouldn't happen, but prevent loops)
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[CLUSTER_SIZE] Node {self.id}: Ignoring JOIN_REQUEST from already-registered child {child_gui} (role={child_node.role})")
+                        return
+                    
+                    # Child already has an address but not registered yet - rate-limited resend
+                    # Find the existing address
+                    existing_addr = None
+                    for node_addr, assigned_gui in self.node_addr_pool.items():
+                        if assigned_gui == child_gui:
+                            existing_addr = wsn.Addr(self.ch_addr.net_addr, node_addr)
+                            break
+                    if existing_addr is not None:
+                        # Rate limiting: only resend if enough time has passed since last send
+                        last_sent = self.join_reply_last_sent.get(child_gui, 0)
+                        time_since_last = self.now - last_sent
+                        if time_since_last >= self.join_reply_cooldown:
+                            # Resend JOIN_REPLY (child might have missed it)
+                            self.send_join_reply(child_gui, existing_addr)
+                            self.join_reply_last_sent[child_gui] = self.now
+                            if config.ENABLE_CLUSTER_DEBUG:
+                                self.log(f"[CLUSTER_SIZE] Node {self.id}: Resending JOIN_REPLY to child {child_gui} (already assigned {existing_addr}, cooldown={time_since_last:.1f}s)")
+                        # else: silently ignore (rate limited)
+                    return  # Don't process again
+                
+                # Count current children
                 current_children = sum(1 for assigned_gui in self.node_addr_pool.values() 
-                                     if assigned_gui is not None and assigned_gui != child_gui)
+                                     if assigned_gui is not None)
                 
                 # Check if cluster has reached max allowed children
                 if current_children >= config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
@@ -1253,18 +1757,62 @@ class SensorNode(wsn.Node):
                     
                     if cluster_id is not None:
                         new_addr = wsn.Addr(cluster_id, 254)
-                        self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Assigned cluster ID {cluster_id} to {pck['source']}")
-                        self.send_network_reply(pck['source'], new_addr)
+                        request_gui = pck.get('gui')  # Get the requesting node's GUI
+                        self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Assigned cluster ID {cluster_id} to {pck['source']} (node {request_gui})")
+                        # Try to route NETWORK_REPLY back - use reverse route if available
+                        route_trace = pck.get('route_trace', [])
+                        if route_trace and len(route_trace) > 1:
+                            # Use reverse routing: send to the node that forwarded the request
+                            prev_hop_gui = route_trace[-2]  # Second-to-last node in trace
+                            prev_hop_info = self.neighbors_table.get(prev_hop_gui)
+                            if prev_hop_info:
+                                # Route through the previous hop
+                                reply_pck = {'dest': pck['source'], 'type': 'NETWORK_REPLY', 'source': self.addr, 'addr': new_addr, 'route_trace': [self.id]}
+                                reply_pck['next_hop'] = prev_hop_info.get('addr')
+                                self._record_route(reply_pck, 'TREE_REVERSE', reply_pck['next_hop'])
+                                self.send(reply_pck)
+                            else:
+                                # Fallback: try normal routing
+                                self.send_network_reply(pck['source'], new_addr)
+                        else:
+                            # No route trace - try normal routing
+                            self.send_network_reply(pck['source'], new_addr)
                     else:
                         self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: ERROR - No available cluster IDs! All {config.NUM_OF_CLUSTERS} clusters in use")
             if pck['type'] == 'JOIN_ACK':
                 # Add member to list if within capacity
                 member_addr = pck.get('source')
                 if member_addr is not None and len(self.members_table) < config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
-                    self.members_table.append(member_addr)
-                    self.log(f"[MEMBER_TABLE] Node {self.id}: Added member {member_addr} (size={len(self.members_table)}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
+                    # Check if already in members_table to avoid duplicates
+                    if member_addr not in self.members_table:
+                        self.members_table.append(member_addr)
+                        self.log(f"[MEMBER_TABLE] Node {self.id}: Added member {member_addr} (size={len(self.members_table)}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})")
+                        # Trigger CH transfer to reduce overlap (after member joins)
+                        # Only for CLUSTER_HEAD (not ROOT) and only if enabled
+                        if self.role == Roles.CLUSTER_HEAD and self.ch_transfer_enabled and self.id != ROOT_ID:
+                            # Add a small delay to ensure member's heartbeat is received first
+                            # Reduced delay to 2 seconds for faster transfer
+                            self.set_timer('TIMER_CH_TRANSFER_DELAY', 2)  # Wait 2 seconds for heartbeat
+                        else:
+                            if config.ENABLE_CLUSTER_DEBUG:
+                                self.log(f"[CH_TRANSFER] Node {self.id}: Skipping transfer - role={self.role}, enabled={self.ch_transfer_enabled}, is_root={self.id == ROOT_ID}")
+                    else:
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[MEMBER_TABLE] Node {self.id}: Member {member_addr} already in table")
                 elif member_addr is not None:
                     self.log(f"[MEMBER_TABLE] Node {self.id}: REJECTED {member_addr} - members_table FULL")
+            if pck['type'] == 'CH_TRANSFER_ACK':
+                # The nominated node accepted the CH role, so we become a router
+                # Check if this ACK is for us (destination matches our addr or ch_addr)
+                is_for_us = (addr_equals(pck.get('dest'), self.addr) or 
+                            addr_equals(pck.get('dest'), self.ch_addr))
+                if is_for_us and self.ch_transfer_in_progress and pck.get('gui') == self.ch_transfer_candidate:
+                    if config.ENABLE_CLUSTER_DEBUG:
+                        self.log(f"[CH_TRANSFER] Node {self.id} received CH_TRANSFER_ACK from {pck.get('gui')}, becoming router")
+                        write_log(self, f"[CH_TRANSFER] Node {self.id} received ACK from {pck.get('gui')}, becoming router")
+                    self.become_router("CH transfer ACK received")
+                    self.ch_transfer_in_progress = False
+                    self.ch_transfer_candidate = None
             if pck['type'] == 'NETWORK_UPDATE':
                 self.child_networks_table[pck['gui']] = pck['child_networks']
                 if self.role != Roles.ROOT:
@@ -1281,21 +1829,118 @@ class SensorNode(wsn.Node):
             if pck['type'] == 'PROBE':
                 # yield self.timeout(.5)
                 self.send_heart_beat()
+                # AGGRESSIVE: If we're REGISTERED and haven't received JOIN_REQUEST, become CH immediately
+                # This helps isolated UNREGISTERED nodes find a parent
+                if getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
+                    if len(self.received_JR_guis) == 0 and self.ch_addr is None:
+                        # Check if we've been REGISTERED for at least a few seconds
+                        if self.registered_since is not None and (self.now - self.registered_since) >= 5:
+                            self.log(f"[CH_CREATION] Node {self.id}: Received PROBE from {pck.get('gui')}, becoming CH immediately (no JOIN_REQUEST received)")
+                            write_log(self, f"[CH_CREATION] Node {self.id}: Becoming CLUSTER_HEAD proactively after receiving PROBE")
+                            
+                            # Self-assign a temporary cluster address (will be updated when ROOT responds)
+                            temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1  # Avoid 0 and 255
+                            self.ch_addr = wsn.Addr(temp_cluster_id, 254)
+                            self.set_role(Roles.CLUSTER_HEAD, reason="proactive CH creation from PROBE")
+                            self._init_address_pool()
+                            
+                            # Send heartbeats immediately so UNREGISTERED nodes can discover us
+                            self.send_heart_beat()
+                            if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+                                self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                                self.heartbeat_timer_active = True
+                            
+                            # Still send NETWORK_REQUEST to ROOT to get official cluster address
+                            self.send_network_request()
+                            
+                            # Start neighbor sharing if enabled
+                            if config.ENABLE_MULTIHOP_DISCOVERY:
+                                self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
             if pck['type'] == 'JOIN_REQUEST':  # it sends a network request to the root
+                # CRITICAL FIX: REGISTERED nodes should forward JOIN_REQUEST to their parent
+                # OR immediately become CLUSTER_HEAD to accept children
                 # Avoid duplicates in received_JR_guis
                 if pck['gui'] not in self.received_JR_guis:
                     self.received_JR_guis.append(pck['gui'])
-                    # yield self.timeout(.5)
-                    self.send_network_request()
+                    if self.ch_addr is None:
+                        # CRITICAL FIX: REGISTERED nodes should become CLUSTER_HEAD immediately
+                        # Don't wait for ROOT's NETWORK_REPLY - become CH proactively to accept children
+                        # This is especially important for nodes that are far from ROOT but close to UNREGISTERED nodes
+                        write_log(self, f"[CH_CREATION] Node {self.id}: Received JOIN_REQUEST from {pck['gui']}, becoming CLUSTER_HEAD immediately (self-assigning cluster address)")
+                        
+                        # Self-assign a temporary cluster address (will be updated when ROOT responds)
+                        # Use a unique cluster ID based on node ID to avoid conflicts
+                        temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1  # Avoid 0 and 255
+                        self.ch_addr = wsn.Addr(temp_cluster_id, 254)
+                        self.set_role(Roles.CLUSTER_HEAD, reason="immediate CH creation for JOIN_REQUEST")
+                        self._init_address_pool()
+                        
+                        # Send heartbeats immediately so other UNREGISTERED nodes can discover us
+                        self.send_heart_beat()
+                        if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+                            self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                            self.heartbeat_timer_active = True
+                        
+                        # Start neighbor sharing if enabled
+                        if config.ENABLE_MULTIHOP_DISCOVERY:
+                            self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                        
+                        # Still send NETWORK_REQUEST to ROOT to get official cluster address
+                        # ROOT will assign a proper cluster ID in NETWORK_REPLY
+                        self.send_network_request()
+                        
+                        # Now we can accept the child immediately
+                        child_gui = pck['gui']
+                        child_addr = self._assign_child_address(child_gui)
+                        if child_addr is not None:
+                            self.send_join_reply(child_gui, child_addr)
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)}) immediately after becoming CH")
+                        else:
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+                    else:
+                        # Already a CH - can send JOIN_REPLY directly
+                        # Process this JOIN_REQUEST immediately
+                        child_gui = pck['gui']
+                        child_addr = self._assign_child_address(child_gui)
+                        if child_addr is not None:
+                            self.send_join_reply(child_gui, child_addr)
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
+                        else:
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+            if pck['type'] == 'TRIGGER_CH_CREATION':  # Request from UNREGISTERED node to become CH
+                # Check if this trigger is for us (either no target_gui specified, or target_gui matches our id)
+                target_gui = pck.get('target_gui')
+                if target_gui is None or target_gui == self.id:
+                    # Only respond if we haven't received JOIN_REQUEST and haven't become CH yet
+                    if len(self.received_JR_guis) == 0 and self.ch_addr is None:
+                        self.log(f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head")
+                        self.send_network_request()
+                    else:
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[CH_CREATION] Node {self.id}: Ignored TRIGGER_CH_CREATION - already has JOIN_REQUEST ({len(self.received_JR_guis)}) or CH address ({self.ch_addr})")
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
-                self.set_role(Roles.CLUSTER_HEAD)
+                # If we already have a ch_addr (self-assigned), update it with ROOT's official address
+                if self.ch_addr is not None:
+                    old_ch_addr = self.ch_addr
+                    self.ch_addr = pck['addr']  # Update with ROOT's official cluster address
+                    write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Updated cluster address from {format_addr(old_ch_addr)} to {format_addr(self.ch_addr)} (ROOT's official assignment)")
+                    # Update all child addresses to use new cluster address
+                    for node_addr, child_gui in list(self.node_addr_pool.items()):
+                        if child_gui is not None:
+                            # Resend JOIN_REPLY with updated address
+                            new_child_addr = wsn.Addr(self.ch_addr.net_addr, node_addr)
+                            self.send_join_reply(child_gui, new_child_addr)
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Resent JOIN_REPLY to child {child_gui} with updated address {format_addr(new_child_addr)}")
+                    return
+                
+                # First time becoming CH (normal flow)
                 self.members_table = []
+                self.ch_addr = pck['addr']  # Set ch_addr before set_role so TX range is drawn correctly
+                self.set_role(Roles.CLUSTER_HEAD)  # This will set color and draw TX range
                 try:
                     write_clusterhead_distances_csv("clusterhead_distances.csv")
                 except Exception as e:
                     self.log(f"CH CSV export error: {e}")
-                self.scene.nodecolor(self.id, 0, 0, 1)
-                self.ch_addr = pck['addr']
                 
                 # Initialize address pool for new CLUSTER_HEAD
                 self._init_address_pool()
@@ -1308,11 +1953,19 @@ class SensorNode(wsn.Node):
                     self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
                 
                 # Process pending join requests (up to max allowed children)
-                self.log(f"[CLUSTER_SIZE] Node {self.id}: Processing {len(self.received_JR_guis)} pending join requests")
+                write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Processing {len(self.received_JR_guis)} pending join requests")
                 accepted_count = 0
                 rejected_count = 0
                 
                 for gui in self.received_JR_guis:
+                    # CRITICAL: Check if this child already has an address assigned (prevent duplicate processing)
+                    child_already_assigned = any(assigned_gui == gui for assigned_gui in self.node_addr_pool.values())
+                    if child_already_assigned:
+                        # Child already processed - skip
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[CLUSTER_SIZE] Node {self.id}: Skipping pending child {gui} - already assigned")
+                        continue
+                    
                     # Check if we've reached max allowed children
                     current_children = sum(1 for assigned_gui in self.node_addr_pool.values() 
                                          if assigned_gui is not None)
@@ -1338,6 +1991,42 @@ class SensorNode(wsn.Node):
                     self.log(f"[CLUSTER_SIZE] Node {self.id}: Processed pending requests - accepted={accepted_count}")
                 
                 self.received_JR_guis = []
+            if pck['type'] == 'CH_TRANSFER':  # Received CH role transfer offer
+                # Accept the CH role transfer
+                if self.id != ROOT_ID and self.role == Roles.REGISTERED:
+                    new_ch_addr = pck.get('new_ch_addr') or pck.get('prev_ch_addr')
+                    if new_ch_addr is not None:
+                        self.log(f"[CH_TRANSFER] Node {self.id} accepting CH role transfer from {pck.get('gui')}")
+                        write_log(self, f"[CH_TRANSFER] Node {self.id} accepting CH role from {pck.get('gui')}")
+                        
+                        # Become CLUSTER_HEAD with the new address
+                        self.set_role(Roles.CLUSTER_HEAD, reason="received CH transfer")
+                        self.ch_addr = new_ch_addr
+                        
+                        # Initialize address pool if it exists
+                        if hasattr(self, '_init_address_pool'):
+                            self._init_address_pool()
+                        
+                        # Start CH operations
+                        self.send_network_update()
+                        self.send_heart_beat()
+                        self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                        
+                        # Start neighbor sharing if enabled
+                        if getattr(config, 'ENABLE_MULTIHOP_DISCOVERY', False):
+                            self.set_timer('TIMER_NEIGHBOR_SHARE', getattr(config, 'NEIGHBOR_SHARE_INTERVAL', 30))
+                        
+                        # Send ACK back to previous CH
+                        ack_pck = {
+                            'dest': pck.get('source'),
+                            'type': 'CH_TRANSFER_ACK',
+                            'source': self.addr,
+                            'gui': self.id,
+                            'new_ch_addr': self.ch_addr
+                        }
+                        self.route_and_forward_package(ack_pck)
+                        write_log(self, f"[CH_TRANSFER] Node {self.id} sent CH_TRANSFER_ACK to {format_addr(ack_pck['dest'])}")
+                return
 
         elif self.role == Roles.UNDISCOVERED:  # if the node is undiscovered
             if pck['type'] == 'HEART_BEAT':  # it kills probe timer, becomes unregistered and sets join request timer once received heart beat
@@ -1347,6 +2036,13 @@ class SensorNode(wsn.Node):
 
         if self.role == Roles.UNREGISTERED:  # if the node is unregistered
             if pck['type'] == 'HEART_BEAT':
+                # Debug: Log received heartbeat to see what we're getting
+                sender_gui = pck.get('gui')
+                sender_role = pck.get('role')
+                sender_addr = pck.get('addr') or pck.get('source') or pck.get('ch_addr')
+                # Always log if we have no candidates (helps debug why nodes can't join)
+                if len(self.candidate_parents_table) == 0:
+                    write_log(self, f"[JOIN] Node {self.id}: Received HEART_BEAT from {sender_gui} (role={sender_role}, addr={format_addr(sender_addr)})")
                 self.update_neighbor(pck)
             if pck['type'] == 'NEIGHBOR_SHARE':
                 self.process_neighbor_share(pck)
@@ -1365,18 +2061,94 @@ class SensorNode(wsn.Node):
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                     self.send_join_ack(pck['source'])
                     if self.ch_addr is not None: # it could be a cluster head which lost its parent
-                        self.set_role(Roles.CLUSTER_HEAD)
+                        self.set_role(Roles.CLUSTER_HEAD)  # This will set color and draw TX range
                         self.send_network_update()
                     else:
-                        self.set_role(Roles.REGISTERED)
-                    # Start periodic neighbor sharing
-                    if config.ENABLE_MULTIHOP_DISCOVERY:
-                        self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
-                    self.set_timer('TIMER_SENSOR', max(1, config.DATA_PACKET_INTERVAL))
+                        self.set_role(Roles.REGISTERED)  # This will set color
+                        self.registered_since = self.now  # Track when we became REGISTERED
+                        # Start periodic neighbor sharing
+                        if config.ENABLE_MULTIHOP_DISCOVERY:
+                            self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                        self.set_timer('TIMER_SENSOR', max(1, config.DATA_PACKET_INTERVAL))
+                        # Set timer for proactive CH creation if enabled
+                        if getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
+                            proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 60)
+                            self.set_timer('TIMER_PROACTIVE_CH', proactive_timer)
                     # # sensor implementation
                     # timer_duration =  self.id % 20
                     # if timer_duration == 0: timer_duration = 1
                     # self.set_timer('TIMER_SENSOR', timer_duration)
+            if pck['type'] == 'CH_TRANSFER':  # REGISTERED node can also receive CH transfer
+                # Accept the CH role transfer
+                if self.id != ROOT_ID and self.role == Roles.REGISTERED:
+                    new_ch_addr = pck.get('new_ch_addr') or pck.get('prev_ch_addr')
+                    if new_ch_addr is not None:
+                        self.log(f"[CH_TRANSFER] Node {self.id} accepting CH role transfer from {pck.get('gui')}")
+                        write_log(self, f"[CH_TRANSFER] Node {self.id} accepting CH role from {pck.get('gui')}")
+                        
+                        # Become CLUSTER_HEAD with the new address
+                        self.set_role(Roles.CLUSTER_HEAD, reason="received CH transfer")
+                        self.ch_addr = new_ch_addr
+                        
+                        # Initialize address pool if it exists
+                        if hasattr(self, '_init_address_pool'):
+                            self._init_address_pool()
+                        
+                        # Start CH operations
+                        self.send_network_update()
+                        self.send_heart_beat()
+                        self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                        
+                        # Start neighbor sharing if enabled
+                        if getattr(config, 'ENABLE_MULTIHOP_DISCOVERY', False):
+                            self.set_timer('TIMER_NEIGHBOR_SHARE', getattr(config, 'NEIGHBOR_SHARE_INTERVAL', 30))
+                        
+                        # Send ACK back to previous CH
+                        ack_pck = {
+                            'dest': pck.get('source'),
+                            'type': 'CH_TRANSFER_ACK',
+                            'source': self.addr,
+                            'gui': self.id,
+                            'new_ch_addr': self.ch_addr
+                        }
+                        self.route_and_forward_package(ack_pck)
+                        write_log(self, f"[CH_TRANSFER] Node {self.id} sent CH_TRANSFER_ACK to {format_addr(ack_pck['dest'])}")
+                return
+
+        elif self.role == Roles.ROUTER:  # Router acts as bridge between CHs
+            # Use safe address comparison (routers have ch_addr=None)
+            dest = pck.get('dest')
+            
+            # CRITICAL: Broadcast packets should NEVER be forwarded - process locally only
+            is_broadcast = False
+            if dest is not None and hasattr(dest, 'is_equal'):
+                is_broadcast = dest.is_equal(wsn.BROADCAST_ADDR)
+            
+            is_for_self = addr_equals(dest, self.addr) or addr_equals(dest, self.ch_addr)
+            
+            # Forward packets if not destined for self and not broadcast (routers don't accept JOIN_REQUEST, etc.)
+            if not is_broadcast and not is_for_self:
+                # If packet already has next_hop, forward it
+                if 'next_hop' in pck.keys():
+                    self.route_and_forward_package(pck)
+                    return
+                # Otherwise, route it first (for packets without next_hop yet)
+                else:
+                    self.route_and_forward_package(pck)
+                    return
+            
+            # Only process packets destined for this router
+            # Maintain neighbor table for routing
+            if pck['type'] == 'HEART_BEAT':
+                self.update_neighbor(pck)
+            if pck['type'] == 'NEIGHBOR_SHARE':
+                self.process_neighbor_share(pck)
+            if pck['type'] == 'PROBE':
+                self.send_heart_beat()
+            
+            # Accept network updates to maintain routing table
+            if pck['type'] == 'NETWORK_UPDATE':
+                self.child_networks_table[pck['gui']] = pck['child_networks']
 
     ###################
     def on_timer_fired(self, name, *args, **kwargs):
@@ -1402,13 +2174,12 @@ class SensorNode(wsn.Node):
                 self.set_timer('TIMER_PROBE', 1)
             else:  # if the counter reached the threshold
                 if self.is_root_eligible:  # if the node is root eligible, it becomes root
-                    self.set_role(Roles.ROOT)
                     self.members_table = []
-                    self.scene.nodecolor(self.id, 0, 0, 0)
                     self.addr = wsn.Addr(0, 254)  # ROOT uses net_addr=0
                     self.ch_addr = wsn.Addr(0, 254)
                     self.root_addr = self.addr
                     self.hop_count = 0
+                    self.set_role(Roles.ROOT)  # This will draw TX range and set color
                     
                     # Initialize address pools for ROOT
                     self._init_address_pool()  # For direct children
@@ -1420,12 +2191,26 @@ class SensorNode(wsn.Node):
                     if config.ENABLE_MULTIHOP_DISCOVERY:
                         self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
                 else:  # otherwise it keeps trying to sending probe after a long time
+                    # Don't become UNREGISTERED too early - let nodes stay UNDISCOVERED longer
+                    # Only become UNREGISTERED if we've been trying for a while and have no neighbors
+                    if self.role == Roles.UNDISCOVERED and len(self.neighbors_table) == 0:
+                        # Only become UNREGISTERED if we've been probing for a while (e.g., 30+ seconds)
+                        # This gives nodes time to discover neighbors before giving up
+                        if self.now > 30:  # Only after 30 seconds of simulation time
+                            self.become_unregistered()
                     self.c_probe = 0
+                    # Keep probing periodically to maintain simulation activity
                     self.set_timer('TIMER_PROBE', 30)
+                    # Also keep trying to join (for both UNDISCOVERED and UNREGISTERED)
+                    if self.role in (Roles.UNDISCOVERED, Roles.UNREGISTERED):
+                        self.set_timer('TIMER_JOIN_REQUEST', 20)
 
         elif name == 'TIMER_HEART_BEAT':  # it sends heart beat message once heart beat timer fired
             self.send_heart_beat()
             self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+            # Mark heartbeat timer as active for ROUTER nodes
+            if self.role == Roles.ROUTER:
+                self.heartbeat_timer_active = True
             #print(self.id)
  
         elif name == 'TIMER_NEIGHBOR_SHARE':  # Periodic neighbor info sharing
@@ -1435,9 +2220,84 @@ class SensorNode(wsn.Node):
 
         elif name == 'TIMER_JOIN_REQUEST':  # if it has not received heart beat messages before, it sets timer again and wait heart beat messages once join request timer fired.
             if len(self.candidate_parents_table) == 0:
-                self.become_unregistered()
+                # No candidates yet - keep probing and retry
+                self.send_probe()
+                self.failed_join_attempts += 1
+                
+                # Log why we have no candidates (for debugging)
+                if config.ENABLE_CLUSTER_DEBUG and self.failed_join_attempts % 10 == 0:
+                    total_neighbors = len(self.neighbors_table)
+                    valid_parents = sum(1 for n in self.neighbors_table.values() 
+                                      if n.get('role') in (Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT))
+                    self.log(f"[JOIN] Node {self.id}: No candidates - total neighbors={total_neighbors}, valid parents={valid_parents}, failed attempts={self.failed_join_attempts}")
+                
+                # Only trigger CH creation once per threshold, not every time
+                threshold = getattr(config, 'UNREGISTERED_CH_TRIGGER_THRESHOLD', 3)
+                if self.failed_join_attempts >= threshold and (self.failed_join_attempts % threshold == 0):
+                    # Only trigger every threshold attempts to prevent spam
+                    self.log(f"[CH_CREATION] Node {self.id}: {self.failed_join_attempts} failed attempts - triggering CH creation")
+                    self._trigger_ch_creation()
+                
+                self.set_timer('TIMER_JOIN_REQUEST', 20)  # Retry after 20 seconds
+                if config.ENABLE_CLUSTER_DEBUG and self.failed_join_attempts % 5 == 0:
+                    self.log(f"[JOIN] Node {self.id}: No candidates, retrying probe and join request (failed attempts={self.failed_join_attempts})")
             else:  # otherwise it chose one of them and sends join request
-                self.select_and_join()
+                # Only send JOIN_REQUEST if not already registered
+                if self.role not in (Roles.REGISTERED, Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT):
+                    # Check rate limit before calling select_and_join
+                    if self.last_join_request_sent_time is not None:
+                        time_since_last = self.now - self.last_join_request_sent_time
+                        # Add small epsilon to prevent floating point issues
+                        if time_since_last < (self.join_request_cooldown - 0.0001):
+                            # Still in cooldown - reschedule for when cooldown expires
+                            remaining_cooldown = self.join_request_cooldown - time_since_last
+                            # Ensure minimum delay to prevent negative delay error (set_timer subtracts 0.00001)
+                            if remaining_cooldown < 0.0001:
+                                remaining_cooldown = 0.0001
+                            self.set_timer('TIMER_JOIN_REQUEST', remaining_cooldown)
+                            if config.ENABLE_CLUSTER_DEBUG:
+                                write_log(self, f"[JOIN] Node {self.id}: Rate limiting JOIN_REQUEST (last sent {time_since_last:.1f}s ago, rescheduling in {remaining_cooldown:.1f}s)")
+                            return  # Exit early, timer already rescheduled
+                    
+                    # Rate limit passed - try to join
+                    # Store time before calling select_and_join to check if a request was actually sent
+                    time_before = self.last_join_request_sent_time
+                    self.select_and_join()
+                    # Reschedule timer for next attempt
+                    # If last_join_request_sent_time changed, a request was sent - use cooldown
+                    # Otherwise, no request was sent (no candidates) - reschedule sooner
+                    if self.last_join_request_sent_time is not None and self.last_join_request_sent_time != time_before:
+                        # A request was just sent - schedule next attempt after cooldown
+                        self.set_timer('TIMER_JOIN_REQUEST', self.join_request_cooldown)
+                    else:
+                        # No request was sent (maybe no candidates) - reschedule sooner to retry
+                        self.set_timer('TIMER_JOIN_REQUEST', 20)
+                else:
+                    # Already registered - still reschedule to keep simulation running
+                    self.set_timer('TIMER_JOIN_REQUEST', 60)  # Check periodically even if registered
+
+        elif name == 'TIMER_CH_TRANSFER_DELAY':
+            # Trigger CH transfer after a delay to ensure member heartbeats are received
+            if self.role == Roles.CLUSTER_HEAD and self.ch_transfer_enabled and self.id != ROOT_ID:
+                if config.ENABLE_CLUSTER_DEBUG:
+                    self.log(f"[CH_TRANSFER] Node {self.id}: TIMER_CH_TRANSFER_DELAY fired, initiating transfer (members={len(self.members_table)})")
+                self.initiate_ch_transfer()
+            else:
+                if config.ENABLE_CLUSTER_DEBUG:
+                    self.log(f"[CH_TRANSFER] Node {self.id}: TIMER_CH_TRANSFER_DELAY fired but conditions not met (role={self.role}, enabled={self.ch_transfer_enabled}, is_root={self.id == ROOT_ID})")
+        
+        elif name == 'TIMER_PROACTIVE_CH':
+            # Proactive CH creation: REGISTERED node becomes CH if no JOIN_REQUEST received
+            proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 15)
+            if self.role == Roles.REGISTERED and getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
+                if len(self.received_JR_guis) == 0 and self.ch_addr is None:
+                    self.log(f"[CH_CREATION] Node {self.id}: Proactive CH creation - no JOIN_REQUEST received after {proactive_timer}s, becoming cluster head")
+                    self.send_network_request()
+                else:
+                    if config.ENABLE_CLUSTER_DEBUG:
+                        self.log(f"[CH_CREATION] Node {self.id}: Proactive CH timer fired but already has JOIN_REQUEST ({len(self.received_JR_guis)}) or CH address ({self.ch_addr})")
+            # Always reschedule timer to keep simulation running
+            self.set_timer('TIMER_PROACTIVE_CH', proactive_timer)
 
         elif name == 'TIMER_SENSOR':
             self.send_random_data_packet()
@@ -1636,12 +2496,17 @@ def create_network(node_class, number_of_nodes=100):
 
 init_log_file()
 
+# Set random seed for reproducible simulations
+random.seed(getattr(config, 'SIM_SEED', 42))
+log_to_console_and_file(f"🎲 Using random seed: {getattr(config, 'SIM_SEED', 42)}")
+
 sim = wsn.Simulator(
     duration=config.SIM_DURATION,
     timescale=config.SIM_TIME_SCALE,
     visual=config.SIM_VISUALIZATION,
     terrain_size=config.SIM_TERRAIN_SIZE,
-    title=config.SIM_TITLE)
+    title=config.SIM_TITLE,
+    seed=getattr(config, 'SIM_SEED', 42))
 
 # creating random network
 create_network(SensorNode, config.SIM_NODE_COUNT)
