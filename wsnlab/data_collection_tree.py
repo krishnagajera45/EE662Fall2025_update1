@@ -419,6 +419,239 @@ def log_packet_loss_statistics():
     log_to_console_and_file("="*70)
 
 
+###########################################################
+# Energy Model Functions (CC2420 Radio)
+###########################################################
+
+def get_tx_current(tx_power_dbm):
+    """Get TX current in Amperes for given TX power level (dBm).
+    
+    Args:
+        tx_power_dbm (float): TX power in dBm (-25 to 0)
+    
+    Returns:
+        float: TX current in Amperes
+    """
+    if tx_power_dbm not in config.TX_POWER_LEVELS:
+        # Interpolate between known values
+        sorted_powers = sorted(config.TX_POWER_LEVELS.keys())
+        if tx_power_dbm < sorted_powers[0]:
+            tx_power_dbm = sorted_powers[0]
+        elif tx_power_dbm > sorted_powers[-1]:
+            tx_power_dbm = sorted_powers[-1]
+        else:
+            # Find surrounding values and interpolate
+            for i in range(len(sorted_powers) - 1):
+                if sorted_powers[i] <= tx_power_dbm <= sorted_powers[i + 1]:
+                    p1, p2 = sorted_powers[i], sorted_powers[i + 1]
+                    i1, i2 = config.TX_POWER_LEVELS[p1], config.TX_POWER_LEVELS[p2]
+                    # Linear interpolation
+                    ratio = (tx_power_dbm - p1) / (p2 - p1)
+                    current_ma = i1 + ratio * (i2 - i1)
+                    return current_ma / 1000.0  # Convert mA to A
+    
+    current_ma = config.TX_POWER_LEVELS[tx_power_dbm]
+    return current_ma / 1000.0  # Convert mA to Amperes
+
+
+def calculate_tx_energy(packet_size_bytes, tx_power_dbm=0, include_pll_overhead=True):
+    """Calculate energy required to transmit a packet (CC2420).
+    
+    Formula: E_tx = (V × I_TX × 8 × (N + 6)) / 250000 + E_overhead
+    
+    Args:
+        packet_size_bytes (int): Packet payload size in bytes (PSDU)
+        tx_power_dbm (float): TX power in dBm (default: 0 dBm)
+        include_pll_overhead (bool): Include PLL turnaround overhead (default: True)
+    
+    Returns:
+        float: Energy in Joules
+    """
+    if not config.ENABLE_ENERGY_MODEL:
+        return 0.0
+    
+    # Get TX current for this power level
+    i_tx = get_tx_current(tx_power_dbm)  # Amperes
+    
+    # Calculate transmission energy: E = (V × I × 8 × (N + 6)) / R
+    # N = packet_size_bytes, 6 = PHY overhead, R = 250000 bps
+    total_bytes = packet_size_bytes + config.CC2420_PHY_OVERHEAD
+    total_bits = total_bytes * 8
+    transmission_time = total_bits / config.CC2420_DATA_RATE  # seconds
+    tx_energy = config.CC2420_VOLTAGE * i_tx * transmission_time  # Joules
+    
+    # Add PLL overhead if requested
+    if include_pll_overhead:
+        tx_energy += config.CC2420_PLL_OVERHEAD_ENERGY
+    
+    return tx_energy
+
+
+def calculate_rx_energy(packet_size_bytes, include_pll_overhead=True):
+    """Calculate energy required to receive a packet (CC2420).
+    
+    Args:
+        packet_size_bytes (int): Packet payload size in bytes (PSDU)
+        include_pll_overhead (bool): Include PLL turnaround overhead (default: True)
+    
+    Returns:
+        float: Energy in Joules
+    """
+    if not config.ENABLE_ENERGY_MODEL:
+        return 0.0
+    
+    # RX current is constant at 18.8 mA
+    i_rx = config.CC2420_RX_CURRENT / 1000.0  # Convert mA to Amperes
+    
+    # Calculate reception energy: E = (V × I × 8 × (N + 6)) / R
+    total_bytes = packet_size_bytes + config.CC2420_PHY_OVERHEAD
+    total_bits = total_bytes * 8
+    reception_time = total_bits / config.CC2420_DATA_RATE  # seconds
+    rx_energy = config.CC2420_VOLTAGE * i_rx * reception_time  # Joules
+    
+    # Add PLL overhead if requested
+    if include_pll_overhead:
+        rx_energy += config.CC2420_PLL_OVERHEAD_ENERGY
+    
+    return rx_energy
+
+
+def estimate_packet_size(packet):
+    """Estimate packet size in bytes from packet dictionary.
+    
+    Args:
+        packet (dict): Packet dictionary
+    
+    Returns:
+        int: Estimated packet size in bytes
+    """
+    # Base packet structure overhead (estimate)
+    base_overhead = 10  # bytes (MAC header, etc.)
+    
+    # Estimate payload size based on packet type
+    packet_type = packet.get('type', 'UNKNOWN')
+    
+    if packet_type == 'HEART_BEAT':
+        return 20 + base_overhead  # ~20 bytes payload
+    elif packet_type == 'JOIN_REQUEST':
+        return 10 + base_overhead
+    elif packet_type == 'JOIN_REPLY':
+        return 15 + base_overhead
+    elif packet_type == 'JOIN_ACK':
+        return 10 + base_overhead
+    elif packet_type == 'NETWORK_REQUEST':
+        return 10 + base_overhead
+    elif packet_type == 'NETWORK_REPLY':
+        return 15 + base_overhead
+    elif packet_type == 'SENSOR':
+        return 50 + base_overhead  # Data packets are larger
+    elif packet_type == 'NEIGHBOR_SHARE':
+        # Variable size based on number of neighbors
+        neighbors_info = packet.get('neighbors_info', {})
+        return 20 + len(neighbors_info) * 10 + base_overhead
+    else:
+        return 30 + base_overhead  # Default estimate
+
+
+# Global dictionary to store cluster TX power assignments
+# Format: {cluster_id (net_addr): tx_power_dbm}
+CLUSTER_TX_POWER = {}
+
+
+def get_cluster_tx_power(cluster_id):
+    """Get TX power for a cluster.
+    
+    Args:
+        cluster_id (int): Cluster ID (net_addr)
+    
+    Returns:
+        float: TX power in dBm
+    """
+    if config.USE_GLOBAL_TX_POWER:
+        return config.TX_POWER_DEFAULT
+    
+    # Check if cluster has assigned power
+    if cluster_id in CLUSTER_TX_POWER:
+        return CLUSTER_TX_POWER[cluster_id]
+    
+    # Default: use global default
+    return config.TX_POWER_DEFAULT
+
+
+def set_cluster_tx_power(cluster_id, tx_power_dbm):
+    """Set TX power for a cluster.
+    
+    Args:
+        cluster_id (int): Cluster ID (net_addr)
+        tx_power_dbm (float): TX power in dBm (must be between TX_POWER_MIN and TX_POWER_MAX)
+    """
+    # Clamp to valid range
+    tx_power_dbm = max(config.TX_POWER_MIN, min(config.TX_POWER_MAX, tx_power_dbm))
+    CLUSTER_TX_POWER[cluster_id] = tx_power_dbm
+    
+    if config.ENABLE_ENERGY_DEBUG:
+        log_to_console_and_file(f"[ENERGY] Cluster {cluster_id} TX power set to {tx_power_dbm} dBm")
+
+
+def optimize_clusters():
+    """Cluster optimization protocol to minimize clusters or energy consumption.
+    
+    This function can be called periodically to optimize the network.
+    """
+    if not config.ENABLE_CLUSTER_OPTIMIZATION:
+        return
+    
+    # Get all active cluster heads
+    active_chs = [node for node in ALL_NODES 
+                  if node.role == Roles.CLUSTER_HEAD and not node.is_shutdown and node.ch_addr is not None]
+    
+    if len(active_chs) <= 1:
+        return  # No optimization needed with 0 or 1 cluster
+    
+    if config.CLUSTER_OPTIMIZATION_MODE == 'CLUSTERS':
+        # Minimize number of clusters by merging nearby clusters
+        # Simple strategy: If two clusters are very close, merge them
+        # This is a placeholder - can be enhanced with more sophisticated algorithms
+        if config.ENABLE_ENERGY_DEBUG:
+            log_to_console_and_file(f"[CLUSTER_OPT] Running cluster minimization (current: {len(active_chs)} clusters)")
+        # TODO: Implement cluster merging logic
+        
+    elif config.CLUSTER_OPTIMIZATION_MODE == 'ENERGY':
+        # Minimize energy consumption by optimizing TX power per cluster
+        if config.ENABLE_ENERGY_DEBUG:
+            log_to_console_and_file(f"[CLUSTER_OPT] Running energy optimization (current: {len(active_chs)} clusters)")
+        
+        for ch in active_chs:
+            cluster_id = ch.ch_addr.net_addr
+            member_count = len(ch.members_table)
+            
+            # Calculate optimal TX power based on cluster characteristics
+            # Strategy: Use minimum power that maintains connectivity
+            # For now, use a simple heuristic: smaller clusters can use lower power
+            if member_count <= 3:
+                # Small cluster - can use lower power
+                optimal_power = max(config.TX_POWER_MIN, config.TX_POWER_DEFAULT - 10)
+            elif member_count <= 10:
+                # Medium cluster - use medium power
+                optimal_power = config.TX_POWER_DEFAULT - 5
+            else:
+                # Large cluster - use default/max power for reliability
+                optimal_power = config.TX_POWER_DEFAULT
+            
+            # Update cluster TX power if different
+            current_power = get_cluster_tx_power(cluster_id)
+            if abs(current_power - optimal_power) > 1.0:  # Only update if significant difference
+                set_cluster_tx_power(cluster_id, optimal_power)
+                
+                # Update all nodes in this cluster
+                for node in ALL_NODES:
+                    if node.ch_addr is not None and node.ch_addr.net_addr == cluster_id:
+                        node.update_cluster_tx_power()
+                
+                if config.ENABLE_ENERGY_DEBUG:
+                    log_to_console_and_file(f"[CLUSTER_OPT] Cluster {cluster_id}: TX power optimized from {current_power} to {optimal_power} dBm (members={member_count})")
+
+
 Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD ROUTER')
 """Enumeration of roles"""
 
@@ -468,6 +701,25 @@ class SensorNode(wsn.Node):
         # Address pool for cluster size control (simple and clean)
         self.node_addr_pool = {}  # {node_addr: gui or None} - pool of available addresses for children
         self.cluster_addr_pool = {}
+        
+        # Energy Model (CC2420)
+        self.energy_remaining = config.BATTERY_ENERGY_TOTAL  # Joules - initial battery energy
+        self.energy_initial = config.BATTERY_ENERGY_TOTAL  # Joules - track initial energy
+        self.energy_tx_total = 0.0  # Total TX energy consumed (Joules)
+        self.energy_rx_total = 0.0  # Total RX energy consumed (Joules)
+        self.energy_baseline_total = 0.0  # Total baseline energy consumed (Joules)
+        self.is_shutdown = False  # Flag to indicate if node is shut down due to low energy
+        self.shutdown_time = None  # Time when node was shut down
+        
+        # TX Power Configuration
+        self.tx_power_dbm = config.TX_POWER_DEFAULT  # Current TX power in dBm
+        self.cluster_tx_power_dbm = None  # TX power assigned to this node's cluster
+        
+        # Debug: Log initial energy assignment
+        if config.ENABLE_ENERGY_MODEL and config.ENABLE_ENERGY_DEBUG:
+            msg = f"[ENERGY] Node {self.id}: Initialized with {self.energy_remaining:.6f}J ({config.BATTERY_ENERGY_TOTAL:.6f}J total, TX power={self.tx_power_dbm}dBm)"
+            self.log(msg)
+            write_log(self, msg)
         
         # Proactive CH creation state
         self.failed_join_attempts = 0  # Count of failed join attempts for UNREGISTERED nodes
@@ -1220,6 +1472,16 @@ class SensorNode(wsn.Node):
     ###################
     def send(self, pck):
         """Ensure every packet carries a creation timestamp and prevent routing loops."""
+        # Check if node is shut down due to low energy
+        if self.is_shutdown:
+            if config.ENABLE_ENERGY_DEBUG:
+                p_type = pck.get('type', 'UNKNOWN')
+                energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                msg = f"[ENERGY] Node {self.id}: Cannot send {p_type} packet - node is shut down (energy={self.energy_remaining:.6f}J, {energy_percent:.2f}%, shutdown at {self.shutdown_time:.1f}s)"
+                self.log(msg)
+                write_log(self, msg)
+            return
+        
         if 'created_at' not in pck:
             pck['created_at'] = self.now
 
@@ -1236,6 +1498,38 @@ class SensorNode(wsn.Node):
             PACKET_STATS['total_dropped'] += 1
             PACKET_STATS['type_dropped'][p_type] += 1
             return  # simulate packet lost on the channel
+        
+        # Calculate and deduct TX energy (before sending, even if packet is lost)
+        if config.ENABLE_ENERGY_MODEL:
+            packet_size = estimate_packet_size(pck)
+            # Get TX power for this node (cluster-based or global)
+            if self.ch_addr is not None:
+                cluster_id = self.ch_addr.net_addr
+                tx_power = get_cluster_tx_power(cluster_id)
+            else:
+                tx_power = self.tx_power_dbm
+            
+            tx_energy = calculate_tx_energy(packet_size, tx_power, include_pll_overhead=True)
+            
+            # Deduct energy
+            if self.energy_remaining >= tx_energy:
+                self.energy_remaining -= tx_energy
+                self.energy_tx_total += tx_energy
+                
+                if config.ENABLE_ENERGY_DEBUG:
+                    energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                    msg = f"[ENERGY] Node {self.id}: TX {p_type} ({packet_size}B, {tx_power}dBm) - {tx_energy*1e6:.3f}µJ, remaining={self.energy_remaining:.6f}J ({energy_percent:.2f}%)"
+                    self.log(msg)
+                    write_log(self, msg)
+            else:
+                # Not enough energy - shut down node
+                if config.ENABLE_ENERGY_DEBUG:
+                    msg = f"[ENERGY] Node {self.id}: Insufficient energy for TX {p_type} - need {tx_energy*1e6:.3f}µJ, have {self.energy_remaining*1e6:.3f}µJ"
+                    self.log(msg)
+                    write_log(self, msg)
+                self.energy_remaining = 0.0
+                self.shutdown_node("Insufficient energy for transmission")
+                return
 
         # CRITICAL: Prevent routing loops while trusting routing decisions
         # If routing has determined a specific next_hop, trust that decision
@@ -1316,6 +1610,74 @@ class SensorNode(wsn.Node):
 
         # For broadcast packets or packets without route_trace, use normal send
         super().send(pck)
+
+    ###################
+    def shutdown_node(self, reason="Low energy"):
+        """Shutdown node when energy drops below minimum threshold.
+        
+        Args:
+            reason (str): Reason for shutdown
+        """
+        if self.is_shutdown:
+            if config.ENABLE_ENERGY_DEBUG:
+                msg = f"[ENERGY] Node {self.id}: Already shut down (attempted shutdown: {reason})"
+                self.log(msg)
+                write_log(self, msg)
+            return  # Already shut down
+        
+        self.is_shutdown = True
+        self.shutdown_time = self.now
+        
+        # Change node color to indicate shutdown (dark gray)
+        self.scene.nodecolor(self.id, 0.3, 0.3, 0.3)
+        
+        # Calculate energy statistics
+        energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+        total_consumed = self.energy_tx_total + self.energy_rx_total + self.energy_baseline_total
+        tx_percent = (self.energy_tx_total / total_consumed * 100) if total_consumed > 0 else 0
+        rx_percent = (self.energy_rx_total / total_consumed * 100) if total_consumed > 0 else 0
+        baseline_percent = (self.energy_baseline_total / total_consumed * 100) if total_consumed > 0 else 0
+        
+        # Log shutdown event with detailed statistics
+        msg = (f"[ENERGY] Node {self.id}: SHUTDOWN - {reason} "
+               f"(energy={self.energy_remaining:.6f}J, {energy_percent:.2f}% remaining, "
+               f"consumed={total_consumed:.6f}J: TX={tx_percent:.1f}%, RX={rx_percent:.1f}%, Baseline={baseline_percent:.1f}%, "
+               f"lifetime={self.shutdown_time:.1f}s)")
+        self.log(msg)
+        write_log(self, msg)
+        
+        # Stop all timers and operations
+        # Note: Node will still receive packets but won't process them (checked in on_receive)
+    
+    ###################
+    def check_energy_level(self):
+        """Check if node energy is below minimum threshold and shutdown if needed."""
+        if not config.ENABLE_ENERGY_MODEL:
+            return
+        
+        if self.energy_remaining < config.BATTERY_ENERGY_MIN and not self.is_shutdown:
+            if config.ENABLE_ENERGY_DEBUG:
+                energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                msg = f"[ENERGY] Node {self.id}: Energy check - {self.energy_remaining:.6f}J ({energy_percent:.2f}%) below threshold {config.BATTERY_ENERGY_MIN:.6f}J"
+                self.log(msg)
+                write_log(self, msg)
+            self.shutdown_node(f"Energy below minimum threshold ({config.BATTERY_ENERGY_MIN:.6f}J)")
+    
+    ###################
+    def update_cluster_tx_power(self):
+        """Update TX power based on cluster assignment."""
+        if self.ch_addr is not None:
+            cluster_id = self.ch_addr.net_addr
+            self.cluster_tx_power_dbm = get_cluster_tx_power(cluster_id)
+            self.tx_power_dbm = self.cluster_tx_power_dbm
+            
+            if config.ENABLE_ENERGY_DEBUG:
+                msg = f"[ENERGY] Node {self.id}: Updated TX power to {self.tx_power_dbm} dBm (cluster {cluster_id})"
+                self.log(msg)
+                write_log(self, msg)
+        else:
+            # Use global default
+            self.tx_power_dbm = config.TX_POWER_DEFAULT
 
     ###################
     def route_and_forward_package(self, pck):
@@ -1654,9 +2016,42 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # Check if node is shut down due to low energy
+        if self.is_shutdown:
+            if config.ENABLE_ENERGY_DEBUG and pck.get('type') not in ('HEART_BEAT',):  # Don't log every heartbeat
+                msg = f"[ENERGY] Node {self.id}: Ignoring {pck.get('type', 'UNKNOWN')} packet - node is shut down"
+                self.log(msg)
+                write_log(self, msg)
+            return
+        
         # Ignore packets if node is failed
         if self.is_failed:
             return
+        
+        # Calculate and deduct RX energy
+        if config.ENABLE_ENERGY_MODEL:
+            packet_size = estimate_packet_size(pck)
+            rx_energy = calculate_rx_energy(packet_size, include_pll_overhead=True)
+            
+            # Deduct energy
+            if self.energy_remaining >= rx_energy:
+                self.energy_remaining -= rx_energy
+                self.energy_rx_total += rx_energy
+                
+                if config.ENABLE_ENERGY_DEBUG and pck.get('type') != 'HEART_BEAT':  # Don't log every heartbeat
+                    energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                    msg = f"[ENERGY] Node {self.id}: RX {pck.get('type', 'UNKNOWN')} ({packet_size}B) - {rx_energy*1e6:.3f}µJ, remaining={self.energy_remaining:.6f}J ({energy_percent:.2f}%)"
+                    self.log(msg)
+                    write_log(self, msg)
+            else:
+                # Not enough energy - shut down node
+                if config.ENABLE_ENERGY_DEBUG:
+                    msg = f"[ENERGY] Node {self.id}: Insufficient energy for RX {pck.get('type', 'UNKNOWN')} - need {rx_energy*1e6:.3f}µJ, have {self.energy_remaining*1e6:.3f}µJ"
+                    self.log(msg)
+                    write_log(self, msg)
+                self.energy_remaining = 0.0
+                self.shutdown_node("Insufficient energy for reception")
+                return
         
         dest = pck.get('dest')
         is_final = False
@@ -1941,6 +2336,26 @@ class SensorNode(wsn.Node):
                 # First time becoming CH (normal flow)
                 self.members_table = []
                 self.ch_addr = pck['addr']  # Set ch_addr before set_role so TX range is drawn correctly
+                
+                # Set TX power for this cluster (if not using global power)
+                if not config.USE_GLOBAL_TX_POWER:
+                    cluster_id = self.ch_addr.net_addr
+                    # Assign TX power to cluster (can be optimized later)
+                    # For now, use default or optimize based on cluster size/distance
+                    if cluster_id not in CLUSTER_TX_POWER:
+                        # Default: use maximum power for reliability
+                        # Can be optimized by cluster optimization protocol
+                        if config.ENABLE_ENERGY_DEBUG:
+                            msg = f"[ENERGY] Node {self.id}: Assigning initial TX power {config.TX_POWER_DEFAULT}dBm to cluster {cluster_id}"
+                            self.log(msg)
+                            write_log(self, msg)
+                        set_cluster_tx_power(cluster_id, config.TX_POWER_DEFAULT)
+                    self.update_cluster_tx_power()
+                elif config.ENABLE_ENERGY_DEBUG:
+                    msg = f"[ENERGY] Node {self.id}: Using global TX power {config.TX_POWER_DEFAULT}dBm (cluster {self.ch_addr.net_addr})"
+                    self.log(msg)
+                    write_log(self, msg)
+                
                 self.set_role(Roles.CLUSTER_HEAD)  # This will set color and draw TX range
                 try:
                     write_clusterhead_distances_csv("clusterhead_distances.csv")
@@ -2062,6 +2477,11 @@ class SensorNode(wsn.Node):
                         log_registration_time(self.id, self.wake_up_time, self.registered_time)
                     self.draw_parent()
                     self.kill_timer('TIMER_JOIN_REQUEST')
+                    
+                    # Update TX power based on cluster assignment
+                    if self.addr is not None:
+                        self.update_cluster_tx_power()
+                    
                     self.send_heart_beat()
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                     self.send_join_ack(pck['source'])
@@ -2079,6 +2499,10 @@ class SensorNode(wsn.Node):
                         if getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
                             proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 60)
                             self.set_timer('TIMER_PROACTIVE_CH', proactive_timer)
+                    
+                    # Start baseline energy consumption timer
+                    if config.ENABLE_ENERGY_MODEL:
+                        self.set_timer('TIMER_BASELINE_ENERGY', 1.0)  # Check every second
                     # # sensor implementation
                     # timer_duration =  self.id % 20
                     # if timer_duration == 0: timer_duration = 1
@@ -2188,13 +2612,21 @@ class SensorNode(wsn.Node):
                     
                     # Initialize address pools for ROOT
                     self._init_address_pool()  # For direct children
-                    self.cluster_addr_pool = {i: None for i in range(1, config.NUM_OF_CLUSTERS + 1)}  # For cluster IDs (start from 1, ROOT uses 0)
+                    self.cluster_addr_pool = {i: None for i in range(1, config.NUM_OF_CLUSTERS + 1)}  # For cluster IDs (start from 1, ROOT uses net_addr=0)
                     self.log(f"[CLUSTER_SIZE] ROOT Node {self.id}: Initialized pools - {config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER} child slots, {config.NUM_OF_CLUSTERS} cluster IDs (ROOT uses net_addr=0)")
                     
                     self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                     # Start neighbor sharing for ROOT
                     if config.ENABLE_MULTIHOP_DISCOVERY:
                         self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                    
+                    # Start cluster optimization timer (ROOT coordinates optimization)
+                    if config.ENABLE_CLUSTER_OPTIMIZATION:
+                        self.set_timer('TIMER_CLUSTER_OPTIMIZATION', config.CLUSTER_OPTIMIZATION_INTERVAL)
+                    
+                    # Start baseline energy consumption timer
+                    if config.ENABLE_ENERGY_MODEL:
+                        self.set_timer('TIMER_BASELINE_ENERGY', 1.0)
                 else:  # otherwise it keeps trying to sending probe after a long time
                     # Don't become UNREGISTERED too early - let nodes stay UNDISCOVERED longer
                     # Only become UNREGISTERED if we've been trying for a while and have no neighbors
@@ -2217,6 +2649,46 @@ class SensorNode(wsn.Node):
             if self.role == Roles.ROUTER:
                 self.heartbeat_timer_active = True
             #print(self.id)
+        
+        elif name == 'TIMER_BASELINE_ENERGY':  # Baseline energy consumption (idle/sleep power)
+            if config.ENABLE_ENERGY_MODEL and not self.is_shutdown:
+                # Calculate baseline energy consumption for 1 second
+                # P = V × I_base, E = P × t
+                baseline_power = config.CC2420_VOLTAGE * config.BASELINE_CURRENT  # Watts
+                baseline_energy = baseline_power * 1.0  # Joules (for 1 second)
+                
+                # Deduct baseline energy
+                if self.energy_remaining >= baseline_energy:
+                    self.energy_remaining -= baseline_energy
+                    self.energy_baseline_total += baseline_energy
+                    
+                    # Debug: Log baseline energy consumption periodically (every 10 seconds to avoid spam)
+                    if config.ENABLE_ENERGY_DEBUG and int(self.now) % 10 == 0:
+                        energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                        msg = f"[ENERGY] Node {self.id}: Baseline - {baseline_energy*1e6:.3f}µJ, remaining={self.energy_remaining:.6f}J ({energy_percent:.2f}%)"
+                        self.log(msg)
+                        write_log(self, msg)
+                else:
+                    # Not enough energy - shut down
+                    self.energy_remaining = 0.0
+                    self.shutdown_node("Insufficient energy for baseline operation")
+                    return
+                
+                # Check if energy is below minimum threshold
+                self.check_energy_level()
+                
+                # Warn if energy is getting low (below 10% but above minimum)
+                if config.ENABLE_ENERGY_DEBUG:
+                    energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
+                    if energy_percent < 10.0 and energy_percent >= (config.BATTERY_ENERGY_MIN / config.BATTERY_ENERGY_TOTAL * 100):
+                        # Log warning every 5 seconds to avoid spam
+                        if int(self.now) % 5 == 0:
+                            msg = f"[ENERGY] Node {self.id}: WARNING - Low energy: {self.energy_remaining:.6f}J ({energy_percent:.2f}%)"
+                            self.log(msg)
+                            write_log(self, msg)
+                
+                # Reschedule timer
+                self.set_timer('TIMER_BASELINE_ENERGY', 1.0)
  
         elif name == 'TIMER_NEIGHBOR_SHARE':  # Periodic neighbor info sharing
             if config.ENABLE_MULTIHOP_DISCOVERY:
@@ -2301,8 +2773,15 @@ class SensorNode(wsn.Node):
                 else:
                     if config.ENABLE_CLUSTER_DEBUG:
                         self.log(f"[CH_CREATION] Node {self.id}: Proactive CH timer fired but already has JOIN_REQUEST ({len(self.received_JR_guis)}) or CH address ({self.ch_addr})")
-            # Always reschedule timer to keep simulation running
+            # Reschedule timer
             self.set_timer('TIMER_PROACTIVE_CH', proactive_timer)
+        
+        elif name == 'TIMER_CLUSTER_OPTIMIZATION':
+            # Cluster optimization: Run periodically to minimize clusters or energy
+            if self.role == Roles.ROOT and config.ENABLE_CLUSTER_OPTIMIZATION:
+                optimize_clusters()
+                # Reschedule
+                self.set_timer('TIMER_CLUSTER_OPTIMIZATION', config.CLUSTER_OPTIMIZATION_INTERVAL)
 
         elif name == 'TIMER_SENSOR':
             self.send_random_data_packet()
