@@ -1121,6 +1121,11 @@ class SensorNode(wsn.Node):
         Returns:
 
         """
+        # UNREGISTERED and UNDISCOVERED nodes should NOT send heartbeats
+        # Only ROOT, CLUSTER_HEAD, REGISTERED, and ROUTER nodes should send heartbeats
+        if self.role in (Roles.UNREGISTERED, Roles.UNDISCOVERED):
+            return  # Do not send heartbeat if node is not registered
+        
         self.send({'dest': wsn.BROADCAST_ADDR,
                    'type': 'HEART_BEAT',
                    'source': self.ch_addr if self.ch_addr is not None else self.addr,
