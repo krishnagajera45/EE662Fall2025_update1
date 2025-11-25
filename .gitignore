@@ -150,3 +150,10 @@ clusterhead_distances.csv
 clusterhead_distances.csv
 Neighbor_Table_Analysis.md
 *.md
+*.png
+.gitignore
+network_lifetime.png
+tx_power_analysis.png
+batch_simulation_results/aggregated_statistics.json
+.gitignore
+batch_simulation_results/
