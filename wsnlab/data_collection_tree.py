@@ -7,10 +7,7 @@ import math
 from source import config
 from collections import Counter
 from datetime import datetime
-
-
 import csv  # <— add this near your other imports
-
 # Track where each node is placed
 NODE_POS = {}  # {node_id: (x, y)}
 
@@ -49,20 +46,16 @@ ROLE_COUNTS = Counter()     # live tally per Roles enum
 
 def _addr_str(a): return "" if a is None else str(a)
 def _role_name(r): return r.name if hasattr(r, "name") else str(r)
-
-
 def addr_key(addr):
     """Return hashable tuple for an address."""
     if addr is None:
         return None
     return (getattr(addr, 'net_addr', None), getattr(addr, 'node_addr', None))
 
-
 def format_addr(addr):
     if addr is None:
         return "None"
     return f"[{addr.net_addr},{addr.node_addr}]"
-
 
 def addr_equals(a, b):
     """Safe address comparison that tolerates None values."""
@@ -73,13 +66,11 @@ def addr_equals(a, b):
     except AttributeError:
         return False
 
-
 def next_packet_id():
     """Return a monotonically increasing packet identifier."""
     global DATA_PACKET_COUNTER
     DATA_PACKET_COUNTER += 1
     return DATA_PACKET_COUNTER
-
 
 def init_log_file():
     """Create timestamped log file if enabled."""
@@ -122,7 +113,6 @@ def init_log_file():
     PACKET_ROUTE_HEADER_WRITTEN = False
     return LOG_FILE_NAME
 
-
 def write_log(node_ref, message, sim_time=None):
     """Write structured log to file."""
     if not config.ENABLE_LOG_FILE or LOG_FILE is None:
@@ -146,13 +136,11 @@ def write_log(node_ref, message, sim_time=None):
     except Exception:
         pass
 
-
 def close_log_file():
     global LOG_FILE
     if LOG_FILE is not None:
         LOG_FILE.close()
         LOG_FILE = None
-
 
 def log_packet_route(pck, current_node, next_hop_str, path_label):
     """Append routing trace rows to packet_routes.csv."""
@@ -176,7 +164,6 @@ def log_packet_route(pck, current_node, next_hop_str, path_label):
             ])
     except Exception:
         pass
-
 
 def log_packet_delivery(pck, receiver_node):
     """Record end-to-end delay once a packet reaches its destination.
@@ -217,7 +204,6 @@ def log_packet_delivery(pck, receiver_node):
         # but we only add it once here as an approximation. More accurate would be
         # to track it per hop, but this provides a reasonable estimate.
         total_delay = base_delay + tx_time + rx_time + processing_time
-        
         with open(PACKET_DELAY_FILE, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -237,7 +223,6 @@ def log_packet_delivery(pck, receiver_node):
             ])
     except Exception:
         pass
-
 
 def record_packet_path(pck, receiver_node):
     """Persist full path for traced data packets."""
@@ -268,7 +253,6 @@ def record_packet_path(pck, receiver_node):
     except Exception:
         pass
 
-
 def log_registration_time(node_id, wake_time, registered_time):
     """Persist per-node join delays."""
     if wake_time is None or registered_time is None:
@@ -277,7 +261,6 @@ def log_registration_time(node_id, wake_time, registered_time):
     with open(REGISTRATION_LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([node_id, f"{wake_time:.6f}", f"{registered_time:.6f}", f"{delay:.6f}"])
-
 
 def calculate_and_log_average_packet_delay():
     """Summarize packet delay statistics.
@@ -306,13 +289,11 @@ def calculate_and_log_average_packet_delay():
         
         avg_base_delay = sum(base_delays) / len(base_delays)
         avg_total_delay = sum(total_delays) / len(total_delays)
-        
         log_to_console_and_file(f"📦 Average packet delay (base): {avg_base_delay:.6f}s (samples={len(base_delays)})")
         log_to_console_and_file(f"📦 Average packet delay (total, with tx/rx/processing): {avg_total_delay:.6f}s (samples={len(total_delays)})")
         log_to_console_and_file(f"   └─ Difference (tx/rx/processing overhead): {avg_total_delay - avg_base_delay:.6f}s")
     except FileNotFoundError:
         log_to_console_and_file("⚠️ Packet delay log not found.")
-
 
 def calculate_and_log_average_join_time():
     """Summarize node join time statistics."""
@@ -330,7 +311,6 @@ def calculate_and_log_average_join_time():
     except FileNotFoundError:
         log_to_console_and_file("⚠️ Registration log not found.")
 
-
 def log_orphan_event(node_id, time, reason, parent_id=None):
     """Log when a node becomes orphaned."""
     try:
@@ -341,7 +321,6 @@ def log_orphan_event(node_id, time, reason, parent_id=None):
     except Exception:
         pass
 
-
 def log_role_change(node_id, old_role, new_role, time, reason=""):
     """Log when a node changes roles."""
     try:
@@ -350,7 +329,6 @@ def log_role_change(node_id, old_role, new_role, time, reason=""):
             writer.writerow([node_id, _role_name(old_role), _role_name(new_role), f"{time:.6f}", reason])
     except Exception:
         pass
-
 
 def log_recovery_event(node_id, failure_time, recovery_time, orphan_count, role_before, role_after):
     """Log when a failed node recovers."""
@@ -370,7 +348,6 @@ def log_recovery_event(node_id, failure_time, recovery_time, orphan_count, role_
     except Exception:
         pass
 
-
 def log_to_console_and_file(message):
     """Write message to both console and log file."""
     print(message)
@@ -380,7 +357,6 @@ def log_to_console_and_file(message):
             LOG_FILE.flush()
         except Exception:
             pass
-
 
 def calculate_and_log_recovery_statistics():
     """Generate recovery statistics report."""
@@ -445,7 +421,6 @@ def calculate_and_log_recovery_statistics():
     
     log_to_console_and_file("="*70)
 
-
 def log_packet_loss_statistics():
     """Summarize packet loss counters."""
     total = PACKET_STATS['total_attempts']
@@ -471,11 +446,9 @@ def log_packet_loss_statistics():
                 f"      {p_type}: attempts={attempts}, dropped={type_drops} ({type_loss:.2f}%)"
             )
 
-
-###########################################################
+##########################################################
 # Energy Model Functions (CC2420 Radio)
 ###########################################################
-
 def get_tx_current(tx_power_dbm):
     """Get TX current in Amperes for given TX power level (dBm).
     
@@ -505,7 +478,6 @@ def get_tx_current(tx_power_dbm):
     
     current_ma = config.TX_POWER_LEVELS[tx_power_dbm]
     return current_ma / 1000.0  # Convert mA to Amperes
-
 
 def calculate_tx_energy(packet_size_bytes, tx_power_dbm=0, include_pll_overhead=True):
     """Calculate energy required to transmit a packet (CC2420).
@@ -539,7 +511,6 @@ def calculate_tx_energy(packet_size_bytes, tx_power_dbm=0, include_pll_overhead=
     
     return tx_energy
 
-
 def calculate_rx_energy(packet_size_bytes, include_pll_overhead=True):
     """Calculate energy required to receive a packet (CC2420).
     
@@ -568,7 +539,6 @@ def calculate_rx_energy(packet_size_bytes, include_pll_overhead=True):
     
     return rx_energy
 
-
 def calculate_transmission_time(packet_size_bytes):
     """Calculate transmission time for a packet (CC2420).
     
@@ -586,7 +556,6 @@ def calculate_transmission_time(packet_size_bytes):
     transmission_time = total_bits / config.CC2420_DATA_RATE  # seconds
     return transmission_time
 
-
 def calculate_reception_time(packet_size_bytes):
     """Calculate reception time for a packet (CC2420).
     
@@ -603,7 +572,6 @@ def calculate_reception_time(packet_size_bytes):
     total_bits = total_bytes * 8
     reception_time = total_bits / config.CC2420_DATA_RATE  # seconds
     return reception_time
-
 
 def calculate_processing_time(packet_type):
     """Estimate processing time for a packet based on its type.
@@ -635,7 +603,6 @@ def calculate_processing_time(packet_type):
     }
     return processing_times.get(packet_type, 0.0002)  # Default: 200 µs
 
-
 def estimate_packet_size(packet):
     """Estimate packet size in bytes from packet dictionary.
     
@@ -650,7 +617,6 @@ def estimate_packet_size(packet):
     
     # Estimate payload size based on packet type
     packet_type = packet.get('type', 'UNKNOWN')
-    
     if packet_type == 'HEART_BEAT':
         return 20 + base_overhead  # ~20 bytes payload
     elif packet_type == 'JOIN_REQUEST':
@@ -672,11 +638,9 @@ def estimate_packet_size(packet):
     else:
         return 30 + base_overhead  # Default estimate
 
-
 # Global dictionary to store cluster TX power assignments
 # Format: {cluster_id (net_addr): tx_power_dbm}
 CLUSTER_TX_POWER = {}
-
 
 def get_cluster_tx_power(cluster_id):
     """Get TX power for a cluster.
@@ -697,7 +661,6 @@ def get_cluster_tx_power(cluster_id):
     # Default: use global default
     return config.TX_POWER_DEFAULT
 
-
 def set_cluster_tx_power(cluster_id, tx_power_dbm):
     """Set TX power for a cluster.
     
@@ -712,7 +675,6 @@ def set_cluster_tx_power(cluster_id, tx_power_dbm):
     if config.ENABLE_ENERGY_DEBUG:
         log_to_console_and_file(f"[ENERGY] Cluster {cluster_id} TX power set to {tx_power_dbm} dBm")
 
-
 def optimize_clusters():
     """Cluster optimization protocol to minimize clusters or energy consumption.
     
@@ -724,7 +686,6 @@ def optimize_clusters():
     # Get all active cluster heads
     active_chs = [node for node in ALL_NODES 
                   if node.role == Roles.CLUSTER_HEAD and not node.is_shutdown and node.ch_addr is not None]
-    
     if len(active_chs) <= 1:
         return  # No optimization needed with 0 or 1 cluster
     
@@ -735,7 +696,6 @@ def optimize_clusters():
         if config.ENABLE_ENERGY_DEBUG:
             log_to_console_and_file(f"[CLUSTER_OPT] Running cluster minimization (current: {len(active_chs)} clusters)")
         # TODO: Implement cluster merging logic
-        
     elif config.CLUSTER_OPTIMIZATION_MODE == 'ENERGY':
         # Minimize energy consumption by optimizing TX power per cluster
         if config.ENABLE_ENERGY_DEBUG:
@@ -770,8 +730,6 @@ def optimize_clusters():
                 
                 if config.ENABLE_ENERGY_DEBUG:
                     log_to_console_and_file(f"[CLUSTER_OPT] Cluster {cluster_id}: TX power optimized from {current_power} to {optimal_power} dBm (members={member_count})")
-
-
 Roles = Enum('Roles', 'UNDISCOVERED UNREGISTERED ROOT REGISTERED CLUSTER_HEAD ROUTER')
 """Enumeration of roles"""
 
@@ -898,7 +856,6 @@ class SensorNode(wsn.Node):
             write_log(self, message)
 
     ###################
-
     def set_role(self, new_role, *, recolor=True, reason=""):
         """Central place to switch roles, keep tallies, and (optionally) recolor."""
         old_role = getattr(self, "role", None)
@@ -939,10 +896,9 @@ class SensorNode(wsn.Node):
                     except:
                         pass
 
+    ##################
+# Router and CH Transfer Methods (for overlap reduction)
     ###################
-    # Router and CH Transfer Methods (for overlap reduction)
-    ###################
-    
     def become_router(self, reason="CH role transferred"):
         """Convert this node from CLUSTER_HEAD to ROUTER.
         Router acts as a bridge between cluster heads, forwarding packets.
@@ -1146,10 +1102,9 @@ class SensorNode(wsn.Node):
         self.log(f"[CH_TRANSFER] Node {self.id} transferring CH role to node {candidate_gui} (dist={candidate_dist:.1f}m, addr={format_addr(candidate_addr)})")
         write_log(self, f"[CH_TRANSFER] Initiating transfer from CH {self.id} to member {candidate_gui} (dist={candidate_dist:.1f}m)")
 
+    ##################
+# Node Failure and Recovery Methods
     ###################
-    # Node Failure and Recovery Methods
-    ###################
-    
     def fail_node(self):
         """Simulate node failure - node stops all operations."""
         if self.is_failed or self.role == Roles.ROOT:
@@ -1267,7 +1222,6 @@ class SensorNode(wsn.Node):
                 return node
         return None
 
-    
     def become_unregistered(self):
         if self.role != Roles.UNDISCOVERED:
             self.kill_all_timers()
@@ -1301,7 +1255,6 @@ class SensorNode(wsn.Node):
         # Remove neighbors that haven't sent heartbeats in 3x the heartbeat interval
         stale_timeout = config.HEARTH_BEAT_TIME_INTERVAL * 3  # 30 seconds default
         current_time = self.now
-        
         stale_neighbors = []
         for neighbor_gui, neighbor_info in self.neighbors_table.items():
             arrival_time = neighbor_info.get('arrival_time', 0)
@@ -1330,7 +1283,6 @@ class SensorNode(wsn.Node):
         if self.now - self._last_neighbor_cleanup > 50.0:
             self._cleanup_stale_neighbors()
             self._last_neighbor_cleanup = self.now
-        
         neighbor_entry = pck.copy()
         neighbor_entry['arrival_time'] = self.now
         # compute Euclidean distance between self and neighbor
@@ -1339,7 +1291,6 @@ class SensorNode(wsn.Node):
             x2, y2 = NODE_POS[neighbor_entry['gui']]
             neighbor_entry['distance'] = math.hypot(x1 - x2, y1 - y2)
         neighbor_entry['mesh_hop_distance'] = 1
-        
         neighbor_gui = neighbor_entry['gui']
         old_entry = self.neighbors_table.get(neighbor_gui)
         self.neighbors_table[neighbor_gui] = neighbor_entry
@@ -1486,7 +1437,6 @@ class SensorNode(wsn.Node):
             if hop_count < min_hop or (hop_count == min_hop and gui < min_hop_gui):
                 min_hop = hop_count
                 min_hop_gui = gui
-        
         if min_hop_gui == 99999:
             if config.ENABLE_CLUSTER_DEBUG:
                 self.log(f"[JOIN] Node {self.id}: No valid candidate found (checked {len(self.candidate_parents_table)} candidates)")
@@ -1511,7 +1461,6 @@ class SensorNode(wsn.Node):
         self.send_join_request(selected_addr)
         # Don't set timer here - let TIMER_JOIN_REQUEST handler manage the timer
         # This prevents duplicate timer scheduling
-
 
     ###################
     def send_probe(self):
@@ -1644,11 +1593,9 @@ class SensorNode(wsn.Node):
         
         if 'created_at' not in pck:
             pck['created_at'] = self.now
-
         p_type = pck.get('type', 'UNKNOWN')
         PACKET_STATS['total_attempts'] += 1
         PACKET_STATS['type_attempts'][p_type] += 1
-
         loss_rate = getattr(config, 'PACKET_LOSS_RATE', 0.0)
         if loss_rate > 0.0 and random.random() < loss_rate:
             msg = (f"[LOSS] Node {self.id}: Dropped packet type={pck.get('type')} "
@@ -1668,7 +1615,6 @@ class SensorNode(wsn.Node):
                 tx_power = get_cluster_tx_power(cluster_id)
             else:
                 tx_power = self.tx_power_dbm
-            
             tx_energy = calculate_tx_energy(packet_size, tx_power, include_pll_overhead=True)
             
             # Deduct energy
@@ -1846,7 +1792,6 @@ class SensorNode(wsn.Node):
         """
         if 'created_at' not in pck:
             pck['created_at'] = self.now
-
         dest = pck.get('dest')
         if dest is None:
             self.debug_log(
@@ -2010,42 +1955,10 @@ class SensorNode(wsn.Node):
                       f"[ROUTING] Node {self.id}: NO_ROUTE for type={pck.get('type')} dest={format_addr(dest)}")
         write_log(self, f"ROUTE_FAIL type={pck.get('type')} dest={format_addr(dest)}")
 
-    ###################
-    def _find_direct_neighbor_hop(self, dest):
-        if dest is None:
-            return None, None
-        for gui, info in self.neighbors_table.items():
-            if addr_equals(info.get('addr'), dest) or addr_equals(info.get('ch_addr'), dest):
-                return dest, f"MESH_DIRECT(gui={gui})"
-        return None, None
-
-    ###################
-    def _find_multihop_route(self, dest):
-        if dest is None:
-            return None, None
-        for gui, info in self.multihop_neighbor_table.items():
-            if addr_equals(info.get('addr'), dest):
-                next_gui = info.get('next_hop')
-                next_entry = self.neighbors_table.get(next_gui)
-                if next_entry:
-                    next_addr = next_entry.get('addr')
-                    if next_addr is not None:
-                        return next_addr, f"MESH_{info.get('hop_dist', 2)}H"
-        return None, None
-
-    ###################
-    def _find_child_route(self, dest):
-        if dest is None or not hasattr(dest, 'net_addr'):
-            return None
-        target_net = dest.net_addr
-        for child_gui, networks in self.child_networks_table.items():
-            if target_net in networks:
-                child_info = self.neighbors_table.get(child_gui)
-                if child_info:
-                    return child_info.get('addr')
-        return None
-
-    ###################
+    ##################
+##################
+##################
+###################
     def _get_parent_next_hop(self):
         if self.role == Roles.ROOT or self.parent_gui is None:
             return None
@@ -2137,7 +2050,6 @@ class SensorNode(wsn.Node):
         # Update tracking
         self.last_network_update_sent_time = self.now
         self.last_child_networks_sent = child_networks_sorted
-
         pck = {'dest': parent_addr, 'type': 'NETWORK_UPDATE', 'source': self.addr,
                'gui': self.id, 'child_networks': child_networks}
         self.route_and_forward_package(pck)
@@ -2219,7 +2131,6 @@ class SensorNode(wsn.Node):
             if self.energy_remaining >= rx_energy:
                 self.energy_remaining -= rx_energy
                 self.energy_rx_total += rx_energy
-                
                 if config.ENABLE_ENERGY_DEBUG and pck.get('type') != 'HEART_BEAT':  # Don't log every heartbeat
                     energy_percent = (self.energy_remaining / config.BATTERY_ENERGY_TOTAL) * 100
                     msg = f"[ENERGY] Node {self.id}: RX {pck.get('type', 'UNKNOWN')} ({packet_size}B) - {rx_energy*1e6:.3f}µJ, remaining={self.energy_remaining:.6f}J ({energy_percent:.2f}%)"
@@ -2258,7 +2169,6 @@ class SensorNode(wsn.Node):
             is_broadcast = False
             if dest is not None and hasattr(dest, 'is_equal'):
                 is_broadcast = dest.is_equal(wsn.BROADCAST_ADDR)
-            
             is_for_self = addr_equals(dest, self.addr) or addr_equals(dest, self.ch_addr)
             
             # Only forward non-broadcast packets that are not for self
@@ -2411,7 +2321,6 @@ class SensorNode(wsn.Node):
             if pck['type'] in ('SENSOR', 'SENSOR_DATA'):
                 pass
                 # self.log(str(pck['source'])+'--'+str(pck['sensor_value']))
-
         elif self.role == Roles.REGISTERED:  # if the node is registered
             if pck['type'] == 'HEART_BEAT':
                 self.update_neighbor(pck)
@@ -2600,7 +2509,6 @@ class SensorNode(wsn.Node):
                     self.log(f"[CLUSTER_SIZE] Node {self.id}: Processed pending requests - accepted={accepted_count}, rejected={rejected_count} (cluster full)")
                 else:
                     self.log(f"[CLUSTER_SIZE] Node {self.id}: Processed pending requests - accepted={accepted_count}")
-                
                 self.received_JR_guis = []
             if pck['type'] == 'CH_TRANSFER':  # Received CH role transfer offer
                 # Accept the CH role transfer
@@ -2743,7 +2651,6 @@ class SensorNode(wsn.Node):
             is_broadcast = False
             if dest is not None and hasattr(dest, 'is_equal'):
                 is_broadcast = dest.is_equal(wsn.BROADCAST_ADDR)
-            
             is_for_self = addr_equals(dest, self.addr) or addr_equals(dest, self.ch_addr)
             
             # Forward packets if not destined for self and not broadcast (routers don't accept JOIN_REQUEST, etc.)
@@ -2840,7 +2747,6 @@ class SensorNode(wsn.Node):
             if self.role == Roles.ROUTER:
                 self.heartbeat_timer_active = True
             #print(self.id)
-        
         elif name == 'TIMER_BASELINE_ENERGY':  # Baseline energy consumption (idle/sleep power)
             if config.ENABLE_ENERGY_MODEL and not self.is_shutdown:
                 # Calculate baseline energy consumption for 1 second
@@ -2953,7 +2859,6 @@ class SensorNode(wsn.Node):
             else:
                 if config.ENABLE_CLUSTER_DEBUG:
                     self.log(f"[CH_TRANSFER] Node {self.id}: TIMER_CH_TRANSFER_DELAY fired but conditions not met (role={self.role}, enabled={self.ch_transfer_enabled}, is_root={self.id == ROOT_ID})")
-        
         elif name == 'TIMER_PROACTIVE_CH':
             # Proactive CH creation: REGISTERED node becomes CH if no JOIN_REQUEST received
             proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 15)
@@ -3003,11 +2908,7 @@ class SensorNode(wsn.Node):
             # Node recovery event
             self.recover_node()
 
-
-
 ROOT_ID = 1 # 0..count-1
-
-
 
 def write_node_distances_csv(path="node_distances.csv"):
     """Write pairwise node-to-node Euclidean distances as an edge list."""
@@ -3022,7 +2923,6 @@ def write_node_distances_csv(path="node_distances.csv"):
                 dist = math.hypot(x1 - x2, y1 - y2)
                 w.writerow([sid, tid, f"{dist:.6f}"])
 
-
 def write_node_distance_matrix_csv(path="node_distance_matrix.csv"):
     ids = sorted(NODE_POS.keys())
     with open(path, "w", newline="") as f:
@@ -3036,7 +2936,6 @@ def write_node_distance_matrix_csv(path="node_distance_matrix.csv"):
                 dist = math.hypot(x1 - x2, y1 - y2)
                 row.append(f"{dist:.6f}")
             w.writerow(row)
-
 
 def write_clusterhead_distances_csv(path="clusterhead_distances.csv"):
     """Write pairwise distances between current cluster heads."""
@@ -3061,8 +2960,6 @@ def write_clusterhead_distances_csv(path="clusterhead_distances.csv"):
                 dist = math.hypot(x1 - x2, y1 - y2)
                 w.writerow([id1, id2, f"{dist:.6f}"])
 
-
-
 def write_neighbor_distances_csv(path="neighbor_distances.csv", dedupe_undirected=True):
     """
     Export neighbor distances per node.
@@ -3080,7 +2977,6 @@ def write_neighbor_distances_csv(path="neighbor_distances.csv", dedupe_undirecte
 
     # Prepare a set to avoid duplicates if dedupe_undirected=True
     seen_pairs = set()
-
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["node_id", "neighbor_id", "distance",
@@ -3120,7 +3016,6 @@ def write_neighbor_distances_csv(path="neighbor_distances.csv", dedupe_undirecte
                 at  = pck.get("arrival_time", "")
 
                 w.writerow([node.id, n_gui, f"{dist:.6f}", n_role, hop, at])
-
 
 def write_multihop_neighbor_table_csv(path="multihop_neighbor_table.csv"):
     """Export multihop neighbor table for all nodes"""
@@ -3167,7 +3062,6 @@ def create_network(node_class, number_of_nodes=100):
         node.arrival = random.uniform(0, config.NODE_ARRIVAL_MAX)
         if node.id == ROOT_ID:
             node.arrival = 0.1
-
 
 init_log_file()
 
@@ -3224,15 +3118,5 @@ calculate_and_log_average_packet_delay()
 if config.ENABLE_NODE_FAILURE_RECOVERY:
     calculate_and_log_recovery_statistics()
 log_packet_loss_statistics()
-
 # Close log file AFTER all statistics are written
 close_log_file()
-
-
-# Created 100 nodes at random locations with random arrival times.
-# When nodes are created they appear in white
-# Activated nodes becomes red
-# Discovered nodes will be yellow
-# Registered nodes will be green.
-# Root node will be black.
-# Routers/Cluster Heads should be blue
