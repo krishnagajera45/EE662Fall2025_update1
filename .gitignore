@@ -144,7 +144,7 @@ node_distances.csv
 Cluster_Tree_Mesh
 wsn_debug.log
 *.pdf
-*.csv
+
 
 Neighbor_Table_Analysis.md
 *.md

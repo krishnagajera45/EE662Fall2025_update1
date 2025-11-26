@@ -1,0 +1,2 @@
+node_id,failure_time,recovery_time,downtime,orphan_count_at_recovery,role_before_failure,role_after_recovery
+29,300.000000,449.238110,149.238110,0,CLUSTER_HEAD,UNDISCOVERED
