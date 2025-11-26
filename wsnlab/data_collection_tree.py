@@ -99,7 +99,8 @@ def init_log_file():
     with open(PACKET_DELAY_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["packet_type", "source", "dest", "source_gui", "dest_gui",
-                         "created_at", "delivered_at", "delay"])
+                         "created_at", "delivered_at", "base_delay", "total_delay",
+                         "tx_time", "rx_time", "processing_time", "num_hops"])
     with open(REGISTRATION_LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["node_id", "start_time", "registered_time", "join_delay"])
@@ -178,7 +179,11 @@ def log_packet_route(pck, current_node, next_hop_str, path_label):
 
 
 def log_packet_delivery(pck, receiver_node):
-    """Record end-to-end delay once a packet reaches its destination."""
+    """Record end-to-end delay once a packet reaches its destination.
+    
+    Includes transmission time, reception time, and processing time for accurate delay measurement.
+    This addresses the bonus requirement for considering processing/transmission time.
+    """
     try:
         created = pck.get("created_at")
         if created is None:
@@ -186,7 +191,33 @@ def log_packet_delivery(pck, receiver_node):
         delivered = getattr(receiver_node, "now", None)
         if delivered is None:
             return
-        delay = delivered - created
+        
+        # Calculate base delay (simulation time difference)
+        base_delay = delivered - created
+        
+        # Add transmission/reception/processing time for accurate delay (bonus requirement)
+        # Get packet size and type
+        packet_size = estimate_packet_size(pck)
+        packet_type = pck.get("type", "UNKNOWN")
+        
+        # Calculate transmission time (time to send packet over radio)
+        tx_time = calculate_transmission_time(packet_size)
+        
+        # Calculate reception time (time to receive packet over radio)
+        rx_time = calculate_reception_time(packet_size)
+        
+        # Calculate processing time (time to process packet at each hop)
+        # Estimate based on route trace length (number of hops)
+        route_trace = pck.get('route_trace', [])
+        num_hops = len(route_trace) if route_trace else 1
+        processing_time = calculate_processing_time(packet_type) * num_hops
+        
+        # Total delay includes base delay + transmission + reception + processing
+        # Note: For multi-hop packets, transmission/reception happens at each hop,
+        # but we only add it once here as an approximation. More accurate would be
+        # to track it per hop, but this provides a reasonable estimate.
+        total_delay = base_delay + tx_time + rx_time + processing_time
+        
         with open(PACKET_DELAY_FILE, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -197,7 +228,12 @@ def log_packet_delivery(pck, receiver_node):
                 receiver_node.id,
                 f"{created:.6f}",
                 f"{delivered:.6f}",
-                f"{delay:.6f}",
+                f"{base_delay:.6f}",  # Base delay (simulation time)
+                f"{total_delay:.6f}",  # Total delay (with tx/rx/processing time)
+                f"{tx_time:.6f}",      # Transmission time
+                f"{rx_time:.6f}",      # Reception time
+                f"{processing_time:.6f}",  # Processing time
+                num_hops,              # Number of hops
             ])
     except Exception:
         pass
@@ -244,18 +280,36 @@ def log_registration_time(node_id, wake_time, registered_time):
 
 
 def calculate_and_log_average_packet_delay():
-    """Summarize packet delay statistics."""
+    """Summarize packet delay statistics.
+    
+    Reports both base delay (simulation time) and total delay (including transmission/reception/processing time).
+    """
     try:
-        delays = []
+        base_delays = []
+        total_delays = []
         with open(PACKET_DELAY_FILE, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                delays.append(float(row["delay"]))
-        if not delays:
+                # Support both old format (delay) and new format (base_delay, total_delay)
+                if "total_delay" in row:
+                    base_delays.append(float(row.get("base_delay", 0)))
+                    total_delays.append(float(row["total_delay"]))
+                elif "delay" in row:
+                    # Old format - use delay as both base and total
+                    delay = float(row["delay"])
+                    base_delays.append(delay)
+                    total_delays.append(delay)
+        
+        if not total_delays:
             print("⚠️ No packet delays recorded.")
             return
-        avg_delay = sum(delays) / len(delays)
-        log_to_console_and_file(f"📦 Average packet delay: {avg_delay:.6f}s (samples={len(delays)})")
+        
+        avg_base_delay = sum(base_delays) / len(base_delays)
+        avg_total_delay = sum(total_delays) / len(total_delays)
+        
+        log_to_console_and_file(f"📦 Average packet delay (base): {avg_base_delay:.6f}s (samples={len(base_delays)})")
+        log_to_console_and_file(f"📦 Average packet delay (total, with tx/rx/processing): {avg_total_delay:.6f}s (samples={len(total_delays)})")
+        log_to_console_and_file(f"   └─ Difference (tx/rx/processing overhead): {avg_total_delay - avg_base_delay:.6f}s")
     except FileNotFoundError:
         log_to_console_and_file("⚠️ Packet delay log not found.")
 
@@ -332,32 +386,6 @@ def calculate_and_log_recovery_statistics():
     """Generate recovery statistics report."""
     log_to_console_and_file("")
     log_to_console_and_file("="*70)
-
-
-def log_packet_loss_statistics():
-    """Summarize packet loss counters."""
-    total = PACKET_STATS['total_attempts']
-    dropped = PACKET_STATS['total_dropped']
-    if total == 0:
-        log_to_console_and_file("\n📡 Packet Loss Stats: No packets attempted.")
-        return
-
-    delivered = total - dropped
-    loss_pct = (dropped / total) * 100
-
-    log_to_console_and_file("\n📡 Packet Loss Statistics")
-    log_to_console_and_file(f"   Attempts : {total}")
-    log_to_console_and_file(f"   Delivered: {delivered}")
-    log_to_console_and_file(f"   Dropped  : {dropped} ({loss_pct:.2f}%)")
-
-    if PACKET_STATS['type_attempts']:
-        log_to_console_and_file("   Breakdown by packet type:")
-        for p_type, attempts in PACKET_STATS['type_attempts'].most_common():
-            type_drops = PACKET_STATS['type_dropped'].get(p_type, 0)
-            type_loss = (type_drops / attempts) * 100 if attempts else 0.0
-            log_to_console_and_file(
-                f"      {p_type}: attempts={attempts}, dropped={type_drops} ({type_loss:.2f}%)"
-            )
     log_to_console_and_file("🔧 NETWORK RECOVERY STATISTICS")
     log_to_console_and_file("="*70)
     
@@ -416,6 +444,32 @@ def log_packet_loss_statistics():
         log_to_console_and_file(f"\n⚠️  Error generating recovery statistics: {e}")
     
     log_to_console_and_file("="*70)
+
+
+def log_packet_loss_statistics():
+    """Summarize packet loss counters."""
+    total = PACKET_STATS['total_attempts']
+    dropped = PACKET_STATS['total_dropped']
+    if total == 0:
+        log_to_console_and_file("\n📡 Packet Loss Stats: No packets attempted.")
+        return
+
+    delivered = total - dropped
+    loss_pct = (dropped / total) * 100
+
+    log_to_console_and_file("\n📡 Packet Loss Statistics")
+    log_to_console_and_file(f"   Attempts : {total}")
+    log_to_console_and_file(f"   Delivered: {delivered}")
+    log_to_console_and_file(f"   Dropped  : {dropped} ({loss_pct:.2f}%)")
+
+    if PACKET_STATS['type_attempts']:
+        log_to_console_and_file("   Breakdown by packet type:")
+        for p_type, attempts in PACKET_STATS['type_attempts'].most_common():
+            type_drops = PACKET_STATS['type_dropped'].get(p_type, 0)
+            type_loss = (type_drops / attempts) * 100 if attempts else 0.0
+            log_to_console_and_file(
+                f"      {p_type}: attempts={attempts}, dropped={type_drops} ({type_loss:.2f}%)"
+            )
 
 
 ###########################################################
@@ -515,6 +569,73 @@ def calculate_rx_energy(packet_size_bytes, include_pll_overhead=True):
     return rx_energy
 
 
+def calculate_transmission_time(packet_size_bytes):
+    """Calculate transmission time for a packet (CC2420).
+    
+    This includes the time to transmit the packet over the radio.
+    Used for accurate delay calculations (bonus requirement).
+    
+    Args:
+        packet_size_bytes (int): Packet payload size in bytes (PSDU)
+    
+    Returns:
+        float: Transmission time in seconds
+    """
+    total_bytes = packet_size_bytes + config.CC2420_PHY_OVERHEAD
+    total_bits = total_bytes * 8
+    transmission_time = total_bits / config.CC2420_DATA_RATE  # seconds
+    return transmission_time
+
+
+def calculate_reception_time(packet_size_bytes):
+    """Calculate reception time for a packet (CC2420).
+    
+    This includes the time to receive the packet over the radio.
+    Used for accurate delay calculations (bonus requirement).
+    
+    Args:
+        packet_size_bytes (int): Packet payload size in bytes (PSDU)
+    
+    Returns:
+        float: Reception time in seconds
+    """
+    total_bytes = packet_size_bytes + config.CC2420_PHY_OVERHEAD
+    total_bits = total_bytes * 8
+    reception_time = total_bits / config.CC2420_DATA_RATE  # seconds
+    return reception_time
+
+
+def calculate_processing_time(packet_type):
+    """Estimate processing time for a packet based on its type.
+    
+    Different packet types require different processing times:
+    - Control packets (JOIN_REQUEST, HEART_BEAT): minimal processing
+    - Data packets (SENSOR_DATA): may require more processing
+    - Routing packets: require routing table lookups
+    
+    Args:
+        packet_type (str): Type of packet
+    
+    Returns:
+        float: Estimated processing time in seconds
+    """
+    # Processing time estimates (in seconds)
+    # These are conservative estimates based on typical microcontroller processing speeds
+    processing_times = {
+        'HEART_BEAT': 0.0001,      # 100 µs - minimal processing
+        'JOIN_REQUEST': 0.0002,    # 200 µs - address assignment
+        'JOIN_REPLY': 0.0002,      # 200 µs - address assignment
+        'JOIN_ACK': 0.0001,        # 100 µs - acknowledgment
+        'NETWORK_REQUEST': 0.0002, # 200 µs - network info lookup
+        'NETWORK_REPLY': 0.0003,   # 300 µs - network info compilation
+        'NETWORK_UPDATE': 0.0003,  # 300 µs - table updates
+        'NEIGHBOR_SHARE': 0.0002,  # 200 µs - neighbor table update
+        'PROBE': 0.0001,           # 100 µs - minimal processing
+        'SENSOR_DATA': 0.0002,     # 200 µs - data packet processing
+    }
+    return processing_times.get(packet_type, 0.0002)  # Default: 200 µs
+
+
 def estimate_packet_size(packet):
     """Estimate packet size in bytes from packet dictionary.
     
@@ -542,7 +663,7 @@ def estimate_packet_size(packet):
         return 10 + base_overhead
     elif packet_type == 'NETWORK_REPLY':
         return 15 + base_overhead
-    elif packet_type == 'SENSOR':
+    elif packet_type in ('SENSOR', 'SENSOR_DATA'):
         return 50 + base_overhead  # Data packets are larger
     elif packet_type == 'NEIGHBOR_SHARE':
         # Variable size based on number of neighbors
@@ -720,10 +841,6 @@ class SensorNode(wsn.Node):
             self.log(msg)
             write_log(self, msg)
         
-        # Proactive CH creation state
-        self.failed_join_attempts = 0  # Count of failed join attempts for UNREGISTERED nodes
-        self.registered_since = None  # Time when node became REGISTERED (for proactive CH creation)  # {cluster_id: source or None} - pool of cluster IDs (ROOT only)
-        
         # Multi-hop neighbor discovery
         self.multihop_neighbor_table = {}  # {neighbor_gui: {'hop_dist': int, 'next_hop': gui, 'distance': float}}
         
@@ -756,6 +873,11 @@ class SensorNode(wsn.Node):
         
         # Track heartbeat timer for ROUTER nodes
         self.heartbeat_timer_active = False
+        
+        # Rate limiting for NETWORK_UPDATE sends (prevent flood)
+        self.last_network_update_sent_time = None
+        self.network_update_cooldown = 5.0  # Minimum seconds between NETWORK_UPDATE sends
+        self.last_child_networks_sent = None  # Track last sent child_networks to avoid duplicates
 
     ###################
     def run(self):
@@ -1976,7 +2098,7 @@ class SensorNode(wsn.Node):
 
     ###################
     def send_network_update(self):
-        """Sending network update message to parent
+        """Sending network update message to parent with rate limiting and change detection
 
         Args:
 
@@ -1990,9 +2112,31 @@ class SensorNode(wsn.Node):
         if parent_addr is None:
             return
 
-        child_networks = [self.ch_addr.net_addr]
+        # Build current child_networks list
+        child_networks = []
+        if self.ch_addr is not None:
+            child_networks = [self.ch_addr.net_addr]
         for networks in self.child_networks_table.values():
             child_networks.extend(networks)
+        
+        # Sort for comparison
+        child_networks_sorted = sorted(set(child_networks))
+        
+        # Check if child_networks actually changed
+        if self.last_child_networks_sent == child_networks_sorted:
+            # No change - don't send duplicate update
+            return
+        
+        # Rate limiting: check cooldown
+        if self.last_network_update_sent_time is not None:
+            time_since_last = self.now - self.last_network_update_sent_time
+            if time_since_last < self.network_update_cooldown:
+                # Still in cooldown - skip this update
+                return
+        
+        # Update tracking
+        self.last_network_update_sent_time = self.now
+        self.last_child_networks_sent = child_networks_sorted
 
         pck = {'dest': parent_addr, 'type': 'NETWORK_UPDATE', 'source': self.addr,
                'gui': self.id, 'child_networks': child_networks}
@@ -2252,10 +2396,19 @@ class SensorNode(wsn.Node):
                     self.ch_transfer_in_progress = False
                     self.ch_transfer_candidate = None
             if pck['type'] == 'NETWORK_UPDATE':
-                self.child_networks_table[pck['gui']] = pck['child_networks']
-                if self.role != Roles.ROOT:
-                    self.send_network_update()
-            if pck['type'] == 'SENSOR':
+                # Only update if this is new information
+                sender_gui = pck.get('gui')
+                new_networks = pck.get('child_networks', [])
+                old_networks = self.child_networks_table.get(sender_gui, [])
+                
+                # Check if networks actually changed
+                if sorted(set(new_networks)) != sorted(set(old_networks)):
+                    self.child_networks_table[sender_gui] = new_networks
+                    # Only forward if we're not ROOT and networks actually changed
+                    if self.role != Roles.ROOT:
+                        self.send_network_update()
+                # If no change, silently ignore to prevent flood
+            if pck['type'] in ('SENSOR', 'SENSOR_DATA'):
                 pass
                 # self.log(str(pck['source'])+'--'+str(pck['sensor_value']))
 

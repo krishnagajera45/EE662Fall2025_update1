@@ -116,15 +116,27 @@ def load_all_metrics():
         metrics['join_times'] = join_times
     
     if Path("packet_delays.csv").exists():
-        delays = []
+        base_delays = []
+        total_delays = []
         with open("packet_delays.csv", 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    delays.append(float(row['delay']))
+                    # Support both old format (delay) and new format (base_delay, total_delay)
+                    if 'total_delay' in row:
+                        total_delays.append(float(row['total_delay']))
+                        if 'base_delay' in row:
+                            base_delays.append(float(row['base_delay']))
+                    elif 'delay' in row:
+                        # Old format - use delay as both base and total
+                        delay = float(row['delay'])
+                        total_delays.append(delay)
+                        base_delays.append(delay)
                 except (ValueError, KeyError):
                     pass
-        metrics['packet_delays'] = delays
+        metrics['packet_delays'] = total_delays  # Use total_delay for compatibility
+        metrics['base_delays'] = base_delays
+        metrics['total_delays'] = total_delays
     
     if Path("role_changes.csv").exists():
         role_changes = []
@@ -703,9 +715,16 @@ def plot_protocol_metrics():
     ax2 = fig.add_subplot(gs[0, 1])
     if 'packet_delays' in metrics and metrics['packet_delays']:
         delays = metrics['packet_delays']
-        ax2.hist(delays, bins=50, edgecolor='black', alpha=0.7, color='lightgreen')
-        ax2.axvline(statistics.mean(delays), color='red', linestyle='--',
-                   label=f'Mean: {statistics.mean(delays):.6f}s')
+        ax2.hist(delays, bins=50, edgecolor='black', alpha=0.7, color='lightgreen', label='Total Delay')
+        
+        # Show base delay if available
+        if 'base_delays' in metrics and metrics['base_delays']:
+            base_delays = metrics['base_delays']
+            ax2.hist(base_delays, bins=50, edgecolor='black', alpha=0.5, color='lightblue', label='Base Delay')
+        
+        mean_delay = statistics.mean(delays)
+        ax2.axvline(mean_delay, color='red', linestyle='--',
+                   label=f'Mean Total: {mean_delay:.6f}s')
         ax2.set_xlabel('Packet Delay (s)')
         ax2.set_ylabel('Frequency')
         ax2.set_title('Packet Delay Distribution')
@@ -808,10 +827,20 @@ def plot_protocol_metrics():
     
     if 'packet_delays' in metrics and metrics['packet_delays']:
         pd = metrics['packet_delays']
-        stats_text += f"Packet Delay Statistics:\n"
+        stats_text += f"Packet Delay Statistics (Total):\n"
         stats_text += f"  Mean: {statistics.mean(pd):.6f}s\n"
         stats_text += f"  Median: {statistics.median(pd):.6f}s\n"
-        stats_text += f"  Total Packets: {len(pd)}\n\n"
+        stats_text += f"  Total Packets: {len(pd)}\n"
+        
+        # Show base delay if available
+        if 'base_delays' in metrics and metrics['base_delays']:
+            bd = metrics['base_delays']
+            stats_text += f"\nPacket Delay Statistics (Base):\n"
+            stats_text += f"  Mean: {statistics.mean(bd):.6f}s\n"
+            stats_text += f"  Median: {statistics.median(bd):.6f}s\n"
+            overhead = statistics.mean(pd) - statistics.mean(bd)
+            stats_text += f"  TX/RX/Processing Overhead: {overhead:.6f}s\n"
+        stats_text += "\n"
     
     if 'cluster_heads' in metrics:
         stats_text += f"Cluster Formation:\n"

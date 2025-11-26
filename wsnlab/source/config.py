@@ -7,6 +7,7 @@ TOTAL_BITS = 16  # Total bits for addressing
 
 
 
+
 ## node properties
 NODE_TX_RANGE = 120  # transmission range of nodes (increase coverage for clustering - need 2x cell size for diagonal neighbors)
 NODE_ARRIVAL_MAX = 100  # max time to wake up (reduced for faster network formation)
