@@ -27,7 +27,7 @@ This will:
 - Generate CSV files with results
 - Show a visualization window (if enabled)
 
-### Generating Plots (WORKING ON IT)
+### Generating Plots (WORKING ON IT).
 
 After running the simulation, generate all the analysis plots:
 
