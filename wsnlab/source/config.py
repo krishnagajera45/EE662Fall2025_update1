@@ -29,7 +29,7 @@ SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
 SIM_VISUALIZATION = True  # visualization active
-SCALE = 1  # scale factor for visualization
+SCALE = 0.9  # scale factor for visualization
 SIM_SEED = 45  # Random seed for reproducible simulations
 
 
@@ -58,7 +58,7 @@ PACKET_TRACE_DURATION = 10.0  # How long to keep packet trace lines visible (sec
 DATA_PACKET_INTERVAL = 10  # seconds between random data injections per node
 
 ## channel model / packet loss
-PACKET_LOSS_RATE = 0.0     # 0.0–1.0 fraction of packets randomly dropped
+PACKET_LOSS_RATE = 0     # 0.0–1.0 fraction of packets randomly dropped
 ENABLE_PACKET_LOSS_DEBUG = True
 
 ## network recovery properties
@@ -67,7 +67,7 @@ NODE_FAILURE_START_TIME = 200  # When to start introducing failures (simulation 
 NODE_FAILURE_INTERVAL = 100  # Time between random node failures
 NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers
 NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers
-NUM_NODES_TO_FAIL = 0  # Number of random nodes to fail during simulation
+NUM_NODES_TO_FAIL = 2  # Number of random nodes to fail during simulation
 ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
 
 ## router / CH transfer properties (for overlap reduction)

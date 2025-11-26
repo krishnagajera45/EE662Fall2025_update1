@@ -7,7 +7,6 @@ import math
 from source import config
 from collections import Counter
 from datetime import datetime
-import os
 
 
 import csv  # <— add this near your other imports
@@ -825,6 +824,7 @@ class SensorNode(wsn.Node):
     def become_router(self, reason="CH role transferred"):
         """Convert this node from CLUSTER_HEAD to ROUTER.
         Router acts as a bridge between cluster heads, forwarding packets.
+        ROUTERs do not have their own cluster and cannot accept children.
         """
         if self.role != Roles.CLUSTER_HEAD or self.id == ROOT_ID:
             return  # Only CHs can become routers, and ROOT never becomes router
@@ -833,8 +833,8 @@ class SensorNode(wsn.Node):
         self.ch_addr = None  # Router doesn't have its own cluster
         self.set_role(Roles.ROUTER, reason=reason)
         
-        # CRITICAL: ROUTER nodes must send periodic HEART_BEAT so UNREGISTERED nodes can discover them
-        # This allows UNREGISTERED nodes to join the network through routers
+        # ROUTER nodes send periodic HEART_BEAT for neighbor discovery and routing
+        # Note: ROUTERs cannot accept children - only CLUSTER_HEAD and ROOT can be parents
         if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
             self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
             self.heartbeat_timer_active = True
@@ -1171,8 +1171,44 @@ class SensorNode(wsn.Node):
         self.set_timer('TIMER_JOIN_REQUEST', 20)
 
     ###################
+    def _cleanup_stale_neighbors(self):
+        """Remove neighbors that haven't sent heartbeats in a while to prevent memory bloat"""
+        if not hasattr(self, 'neighbors_table') or not self.neighbors_table:
+            return
+        
+        # Remove neighbors that haven't sent heartbeats in 3x the heartbeat interval
+        stale_timeout = config.HEARTH_BEAT_TIME_INTERVAL * 3  # 30 seconds default
+        current_time = self.now
+        
+        stale_neighbors = []
+        for neighbor_gui, neighbor_info in self.neighbors_table.items():
+            arrival_time = neighbor_info.get('arrival_time', 0)
+            if current_time - arrival_time > stale_timeout:
+                stale_neighbors.append(neighbor_gui)
+        
+        # Remove stale neighbors
+        for neighbor_gui in stale_neighbors:
+            del self.neighbors_table[neighbor_gui]
+            # Also remove from candidate_parents_table if present
+            if neighbor_gui in self.candidate_parents_table:
+                self.candidate_parents_table.remove(neighbor_gui)
+            # Remove from multihop table if present
+            if hasattr(self, 'multihop_neighbor_table') and neighbor_gui in self.multihop_neighbor_table:
+                del self.multihop_neighbor_table[neighbor_gui]
+        
+        if stale_neighbors and config.ENABLE_NEIGHBOR_DEBUG:
+            self.log(f"[NEIGHBOR_CLEANUP] Node {self.id}: Removed {len(stale_neighbors)} stale neighbors")
+    
+    ###################
     def update_neighbor(self, pck):
         """Update 1-hop neighbor info from heartbeat and add to multihop table"""
+        # Cleanup stale neighbors periodically (every 50 seconds) to prevent memory bloat
+        if not hasattr(self, '_last_neighbor_cleanup'):
+            self._last_neighbor_cleanup = 0.0
+        if self.now - self._last_neighbor_cleanup > 50.0:
+            self._cleanup_stale_neighbors()
+            self._last_neighbor_cleanup = self.now
+        
         neighbor_entry = pck.copy()
         neighbor_entry['arrival_time'] = self.now
         # compute Euclidean distance between self and neighbor
@@ -1188,7 +1224,7 @@ class SensorNode(wsn.Node):
 
         # Only add to candidate_parents_table if:
         # 1. Not in child_networks_table (not our child)
-        # 2. Has a valid role that can be a parent (REGISTERED, CLUSTER_HEAD, ROUTER, or ROOT)
+        # 2. Has a valid role that can be a parent (CLUSTER_HEAD or ROOT)
         # 3. Not already in candidate_parents_table
         # 4. Has a valid address (can accept JOIN_REQUESTs)
         neighbor_role = neighbor_entry.get('role')
@@ -1198,9 +1234,10 @@ class SensorNode(wsn.Node):
         neighbor_addr = neighbor_entry.get('source') or neighbor_entry.get('addr') or neighbor_entry.get('ch_addr')
         
         # Check if role is valid - handle both Enum and string comparisons
-        # CRITICAL: Only CLUSTER_HEAD, ROUTER, and ROOT can be parents
+        # CRITICAL: Only CLUSTER_HEAD and ROOT can be parents
         # REGISTERED nodes cannot accept children until they become CLUSTER_HEAD
-        valid_roles = (Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT)
+        # ROUTER nodes act as bridges and don't have their own cluster, so they cannot accept children
+        valid_roles = (Roles.CLUSTER_HEAD, Roles.ROOT)
         has_valid_role = (neighbor_role in valid_roles) if neighbor_role is not None else False
         has_valid_addr = (neighbor_addr is not None)
         can_be_parent = has_valid_role and has_valid_addr
@@ -1253,7 +1290,7 @@ class SensorNode(wsn.Node):
     def process_neighbor_share(self, pck):
         """Process neighbor info shared by neighbors (Distance Vector style)"""
         if not config.ENABLE_MULTIHOP_DISCOVERY:
-                        return
+            return
 
         sender_gui = pck['gui']
         neighbors_info = pck.get('neighbors_info', {})
@@ -1317,9 +1354,10 @@ class SensorNode(wsn.Node):
             if neighbor_info is None:
                 continue
             # Only consider neighbors that can actually be parents (have valid roles)
-            # CRITICAL: Only CLUSTER_HEAD, ROUTER, and ROOT can accept children
+            # CRITICAL: Only CLUSTER_HEAD and ROOT can accept children
+            # ROUTER nodes act as bridges and don't have their own cluster, so they cannot accept children
             neighbor_role = neighbor_info.get('role')
-            valid_roles = (Roles.CLUSTER_HEAD, Roles.ROUTER, Roles.ROOT)
+            valid_roles = (Roles.CLUSTER_HEAD, Roles.ROOT)
             if neighbor_role not in valid_roles:
                 continue
             hop_count = neighbor_info.get('hop_count', 99999)
@@ -1407,7 +1445,7 @@ class SensorNode(wsn.Node):
                     'addr': info.get('addr')
                 }
         
-        if len(neighbors_to_share) == 0:
+        if not neighbors_to_share:
             return
         
         # Send to all 1-hop neighbors
@@ -2982,7 +3020,7 @@ init_log_file()
 
 # Set random seed for reproducible simulations
 random.seed(getattr(config, 'SIM_SEED', 42))
-log_to_console_and_file(f"🎲 Using random seed: {getattr(config, 'SIM_SEED', 42)}")
+log_to_console_and_file(f" Using random seed: {getattr(config, 'SIM_SEED', 42)}")
 
 sim = wsn.Simulator(
     duration=config.SIM_DURATION,
@@ -3017,7 +3055,7 @@ if config.ENABLE_NODE_FAILURE_RECOVERY:
             # Schedule the failure timer on the node
             node.set_timer(f'TIMER_NODE_FAILURE_{node.id}', failure_time)
             
-            msg = f"📅 Scheduled: Node {node.id} will fail at {failure_time:.1f}s, recover at {recovery_time:.1f}s (downtime: {recovery_time-failure_time:.1f}s)"
+            msg = f" Scheduled: Node {node.id} will fail at {failure_time:.1f}s, recover at {recovery_time:.1f}s (downtime: {recovery_time-failure_time:.1f}s)"
             log_to_console_and_file(msg)
 
 # start the simulation
