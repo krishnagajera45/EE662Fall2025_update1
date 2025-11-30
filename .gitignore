@@ -139,7 +139,7 @@ idea/*
 .idea/workspace.xml
 .idea/workspace.xml
 
-node_distances.csv
+
 
 Cluster_Tree_Mesh
 wsn_debug.log

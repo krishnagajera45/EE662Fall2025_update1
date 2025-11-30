@@ -956,6 +956,595 @@ def plot_config_parameters():
 
 
 # ============================================================================
+# BATCH SIMULATION ANALYSIS
+# ============================================================================
+
+def load_batch_simulation_results(batch_dir="batch_simulation_results"):
+    """Load results from batch simulation runs."""
+    batch_path = Path(batch_dir)
+    if not batch_path.exists():
+        return None
+    
+    # Load aggregated statistics
+    agg_file = batch_path / "aggregated_statistics.json"
+    if agg_file.exists():
+        with open(agg_file, 'r') as f:
+            return json.load(f)
+    
+    # Load individual runs and aggregate
+    stats_file = batch_path / "individual_run_stats.json"
+    if stats_file.exists():
+        with open(stats_file, 'r') as f:
+            all_stats = json.load(f)
+        
+        # Aggregate manually
+        successful = [s for s in all_stats if s.get('success', False)]
+        if not successful:
+            return None
+        
+        aggregated = {}
+        join_times = [s.get('avg_join_time') for s in successful if 'avg_join_time' in s]
+        if join_times:
+            aggregated['avg_join_time_mean'] = statistics.mean(join_times)
+            aggregated['avg_join_time_std'] = statistics.stdev(join_times) if len(join_times) > 1 else 0
+            aggregated['avg_join_time_min'] = min(join_times)
+            aggregated['avg_join_time_max'] = max(join_times)
+        
+        packet_delays = [s.get('avg_packet_delay') for s in successful if 'avg_packet_delay' in s]
+        if packet_delays:
+            aggregated['avg_packet_delay_mean'] = statistics.mean(packet_delays)
+            aggregated['avg_packet_delay_std'] = statistics.stdev(packet_delays) if len(packet_delays) > 1 else 0
+        
+        cluster_counts = [s.get('num_clusters') for s in successful if 'num_clusters' in s]
+        if cluster_counts:
+            aggregated['avg_num_clusters'] = statistics.mean(cluster_counts)
+            aggregated['num_clusters_std'] = statistics.stdev(cluster_counts) if len(cluster_counts) > 1 else 0
+        
+        aggregated['num_successful_runs'] = len(successful)
+        aggregated['num_total_runs'] = len(all_stats)
+        
+        return aggregated
+    
+    return None
+
+
+def plot_batch_simulation_averages():
+    """Plot average statistics from 10 simulation runs."""
+    print("  Generating batch simulation average plots...")
+    
+    batch_results = load_batch_simulation_results()
+    if not batch_results:
+        print("    Warning: No batch simulation results found. Run run_batch_simulations.py first.")
+        return
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Average Network Performance (10 Simulation Runs)', fontsize=16, fontweight='bold')
+    
+    # Join time statistics
+    if 'avg_join_time_mean' in batch_results:
+        mean_join = batch_results['avg_join_time_mean']
+        std_join = batch_results['avg_join_time_std']
+        min_join = batch_results['avg_join_time_min']
+        max_join = batch_results['avg_join_time_max']
+        
+        categories = ['Mean', 'Min', 'Max']
+        values = [mean_join, min_join, max_join]
+        errors = [std_join, 0, 0]
+        
+        axes[0, 0].bar(categories, values, yerr=errors, capsize=5, alpha=0.7, 
+                      color=['blue', 'green', 'red'], edgecolor='black')
+        axes[0, 0].set_ylabel('Join Time (seconds)', fontsize=12)
+        axes[0, 0].set_title('Average Time to Join Network', fontsize=14)
+        axes[0, 0].grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for i, (cat, val) in enumerate(zip(categories, values)):
+            axes[0, 0].text(i, val + errors[i] + 0.5, f'{val:.2f}s', 
+                           ha='center', va='bottom', fontweight='bold')
+    
+    # Packet delay statistics
+    if 'avg_packet_delay_mean' in batch_results:
+        mean_delay = batch_results['avg_packet_delay_mean']
+        std_delay = batch_results['avg_packet_delay_std']
+        
+        axes[0, 1].bar(['Average Packet Delay'], [mean_delay], yerr=[std_delay],
+                      capsize=5, alpha=0.7, color='purple', edgecolor='black')
+        axes[0, 1].set_ylabel('Delay (seconds)', fontsize=12)
+        axes[0, 1].set_title('Average Packet Delay', fontsize=14)
+        axes[0, 1].grid(True, alpha=0.3, axis='y')
+        axes[0, 1].text(0, mean_delay + std_delay + 0.0001, f'{mean_delay:.6f}s',
+                        ha='center', va='bottom', fontweight='bold')
+    
+    # Cluster count statistics
+    if 'avg_num_clusters' in batch_results:
+        mean_clusters = batch_results['avg_num_clusters']
+        std_clusters = batch_results['num_clusters_std']
+        
+        axes[1, 0].bar(['Average Clusters'], [mean_clusters], yerr=[std_clusters],
+                      capsize=5, alpha=0.7, color='orange', edgecolor='black')
+        axes[1, 0].set_ylabel('Number of Clusters', fontsize=12)
+        axes[1, 0].set_title('Average Number of Clusters', fontsize=14)
+        axes[1, 0].grid(True, alpha=0.3, axis='y')
+        axes[1, 0].text(0, mean_clusters + std_clusters + 0.5, f'{mean_clusters:.1f}',
+                       ha='center', va='bottom', fontweight='bold')
+    
+    # Summary statistics
+    summary_text = "BATCH SIMULATION SUMMARY\n" + "="*40 + "\n\n"
+    summary_text += f"Successful Runs: {batch_results.get('num_successful_runs', 0)}/{batch_results.get('num_total_runs', 0)}\n\n"
+    
+    if 'avg_join_time_mean' in batch_results:
+        summary_text += f"Join Time:\n"
+        summary_text += f"  Mean: {batch_results['avg_join_time_mean']:.4f}s\n"
+        summary_text += f"  Std Dev: {batch_results['avg_join_time_std']:.4f}s\n"
+        summary_text += f"  Range: {batch_results['avg_join_time_min']:.4f}s - {batch_results['avg_join_time_max']:.4f}s\n\n"
+    
+    if 'avg_packet_delay_mean' in batch_results:
+        summary_text += f"Packet Delay:\n"
+        summary_text += f"  Mean: {batch_results['avg_packet_delay_mean']:.6f}s\n"
+        summary_text += f"  Std Dev: {batch_results['avg_packet_delay_std']:.6f}s\n\n"
+    
+    if 'avg_num_clusters' in batch_results:
+        summary_text += f"Clusters:\n"
+        summary_text += f"  Mean: {batch_results['avg_num_clusters']:.1f}\n"
+        summary_text += f"  Std Dev: {batch_results['num_clusters_std']:.1f}\n"
+    
+    axes[1, 1].text(0.1, 0.5, summary_text, fontsize=11,
+                   verticalalignment='center', family='monospace',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    axes[1, 1].axis('off')
+    axes[1, 1].set_title('Summary Statistics', fontsize=14)
+    
+    plt.tight_layout()
+    plt.savefig("batch_simulation_averages.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: batch_simulation_averages.png")
+
+
+# ============================================================================
+# PACKET LOSS ANALYSIS
+# ============================================================================
+
+def plot_packet_loss_vs_join_time():
+    """Plot packet loss ratio vs time to join network."""
+    print("  Generating packet loss vs join time plot...")
+    
+    # Try to load from saved results first
+    results_file = Path("packet_loss_analysis.json")
+    if results_file.exists():
+        with open(results_file, 'r') as f:
+            results = json.load(f)
+    else:
+        print("    Warning: No packet_loss_analysis.json found.")
+        print("    To generate this plot, run simulations with different PACKET_LOSS_RATE values")
+        print("    and save results to packet_loss_analysis.json")
+        return
+    
+    if not results:
+        print("    Warning: No packet loss analysis data available")
+        return
+    
+    loss_rates = sorted([float(k) for k in results.keys()])
+    avg_join_times = [results[str(r)]['avg_join_time'] for r in loss_rates]
+    min_join_times = [results[str(r)]['min_join_time'] for r in loss_rates]
+    max_join_times = [results[str(r)]['max_join_time'] for r in loss_rates]
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    fig.suptitle('Packet Loss Ratio vs Network Join Time', fontsize=16, fontweight='bold')
+    
+    # Main plot
+    axes[0].plot(loss_rates, avg_join_times, 'o-', linewidth=2, markersize=10, 
+                color='blue', label='Average Join Time')
+    axes[0].fill_between(loss_rates, min_join_times, max_join_times, 
+                         alpha=0.3, color='lightblue', label='Min-Max Range')
+    axes[0].set_xlabel('Packet Loss Rate', fontsize=12)
+    axes[0].set_ylabel('Join Time (seconds)', fontsize=12)
+    axes[0].set_title('Average Time to Join Network vs Packet Loss Rate', fontsize=14)
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_xscale('log')
+    
+    # Add value labels
+    for i, (lr, ajt) in enumerate(zip(loss_rates, avg_join_times)):
+        axes[0].annotate(f'{ajt:.2f}s', (lr, ajt), 
+                        textcoords="offset points", xytext=(0,10), ha='center')
+    
+    # Bar chart comparison
+    x_pos = np.arange(len(loss_rates))
+    axes[1].bar(x_pos, avg_join_times, alpha=0.7, color='steelblue', edgecolor='black')
+    axes[1].set_xlabel('Packet Loss Rate', fontsize=12)
+    axes[1].set_ylabel('Average Join Time (seconds)', fontsize=12)
+    axes[1].set_title('Join Time Comparison Across Loss Rates', fontsize=14)
+    axes[1].set_xticks(x_pos)
+    axes[1].set_xticklabels([f'{lr:.0e}' if lr > 0 else '0' for lr in loss_rates], rotation=45)
+    axes[1].grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    for i, ajt in enumerate(avg_join_times):
+        axes[1].text(i, ajt + max(avg_join_times) * 0.02, f'{ajt:.2f}s',
+                    ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig("packet_loss_vs_join_time.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: packet_loss_vs_join_time.png")
+
+
+# ============================================================================
+# CONFIG PARAMETERS WITH TIME PLOTS
+# ============================================================================
+
+def plot_config_parameters_over_time():
+    """Plot how config parameters affect network behavior over time."""
+    print("  Generating config parameters over time plots...")
+    
+    # Load registration log to see join times over simulation
+    if not Path("registration_log.csv").exists():
+        print("    Warning: registration_log.csv not found")
+        return
+    
+    join_times_by_time = defaultdict(list)
+    with open("registration_log.csv", 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                join_time = float(row['join_delay'])
+                registration_time = float(row.get('registration_time', 0))
+                join_times_by_time[int(registration_time // 50)].append(join_time)  # 50s bins
+            except (ValueError, KeyError):
+                pass
+    
+    # Load role changes over time
+    role_changes_by_time = defaultdict(int)
+    if Path("role_changes.csv").exists():
+        with open("role_changes.csv", 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    time_bin = int(float(row['time']) // 50)
+                    role_changes_by_time[time_bin] += 1
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load packet delays over time
+    packet_delays_by_time = defaultdict(list)
+    if Path("packet_delays.csv").exists():
+        with open("packet_delays.csv", 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    delay = float(row.get('total_delay', row.get('delay', 0)))
+                    time_bin = int(delay * 10) % 100  # Rough estimate
+                    packet_delays_by_time[time_bin].append(delay)
+                except (ValueError, KeyError):
+                    pass
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Network Behavior Over Time', fontsize=16, fontweight='bold')
+    
+    # Join times over time
+    time_bins = sorted(join_times_by_time.keys())
+    if time_bins:
+        avg_join_times = [statistics.mean(join_times_by_time[tb]) for tb in time_bins]
+        axes[0, 0].plot([tb * 50 for tb in time_bins], avg_join_times, 'o-', 
+                       linewidth=2, markersize=6, color='blue')
+        axes[0, 0].set_xlabel('Simulation Time (seconds)', fontsize=12)
+        axes[0, 0].set_ylabel('Average Join Time (seconds)', fontsize=12)
+        axes[0, 0].set_title('Average Join Time Over Simulation Time', fontsize=14)
+        axes[0, 0].grid(True, alpha=0.3)
+    
+    # Role changes over time
+    role_time_bins = sorted(role_changes_by_time.keys())
+    if role_time_bins:
+        role_counts = [role_changes_by_time[tb] for tb in role_time_bins]
+        axes[0, 1].bar([tb * 50 for tb in role_time_bins], role_counts, 
+                      alpha=0.7, color='orange', edgecolor='black')
+        axes[0, 1].set_xlabel('Simulation Time (seconds)', fontsize=12)
+        axes[0, 1].set_ylabel('Number of Role Changes', fontsize=12)
+        axes[0, 1].set_title('Role Changes Over Time', fontsize=14)
+        axes[0, 1].grid(True, alpha=0.3, axis='y')
+    
+    # Packet delays over time
+    delay_time_bins = sorted(packet_delays_by_time.keys())
+    if delay_time_bins:
+        avg_delays = [statistics.mean(packet_delays_by_time[tb]) for tb in delay_time_bins]
+        axes[1, 0].plot([tb * 10 for tb in delay_time_bins], avg_delays, 's-',
+                        linewidth=2, markersize=4, color='green')
+        axes[1, 0].set_xlabel('Estimated Time (seconds)', fontsize=12)
+        axes[1, 0].set_ylabel('Average Packet Delay (seconds)', fontsize=12)
+        axes[1, 0].set_title('Packet Delay Over Time', fontsize=14)
+        axes[1, 0].grid(True, alpha=0.3)
+    
+    # Cumulative nodes joined
+    cumulative_joins = []
+    total = 0
+    for tb in sorted(join_times_by_time.keys()):
+        total += len(join_times_by_time[tb])
+        cumulative_joins.append(total)
+    
+    if cumulative_joins:
+        axes[1, 1].plot([tb * 50 for tb in sorted(join_times_by_time.keys())], 
+                       cumulative_joins, '^-', linewidth=2, markersize=6, color='purple')
+        axes[1, 1].set_xlabel('Simulation Time (seconds)', fontsize=12)
+        axes[1, 1].set_ylabel('Cumulative Nodes Joined', fontsize=12)
+        axes[1, 1].set_title('Network Growth Over Time', fontsize=14)
+        axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("config_parameters_over_time.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: config_parameters_over_time.png")
+
+
+# ============================================================================
+# ENHANCED CLUSTER ANALYSIS
+# ============================================================================
+
+def plot_max_nodes_vs_clusters():
+    """Plot max nodes per cluster vs number of clusters."""
+    print("  Generating max nodes vs clusters plot...")
+    
+    params = load_config_parameters()
+    total_nodes = int(params.get('SIM_NODE_COUNT', 100)) if params else 100
+    
+    # Calculate theoretical relationship
+    max_sizes = range(5, 51, 1)
+    cluster_counts = [int(np.ceil(total_nodes / s)) for s in max_sizes]
+    
+    # Get actual cluster count from data
+    actual_clusters = 0
+    if Path("role_changes.csv").exists():
+        cluster_heads = set()
+        with open("role_changes.csv", 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get('new_role') == 'CLUSTER_HEAD':
+                    try:
+                        cluster_heads.add(int(row['node_id']))
+                    except (ValueError, KeyError):
+                        pass
+        actual_clusters = len(cluster_heads)
+    
+    current_max = int(params.get('MAX_CHILD_NODES_ALLOWED_PER_CLUSTER', 20)) if params else 20
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    fig.suptitle('Max Nodes per Cluster vs Number of Clusters', fontsize=16, fontweight='bold')
+    
+    # Main relationship plot
+    axes[0].plot(max_sizes, cluster_counts, linewidth=2, color='blue', label='Theoretical')
+    axes[0].axvline(current_max, color='red', linestyle='--', linewidth=2,
+                   label=f'Current Config: {current_max} nodes/cluster')
+    if actual_clusters > 0:
+        current_clusters = int(np.ceil(total_nodes / current_max))
+        axes[0].plot(current_max, current_clusters, 'ro', markersize=12,
+                    label=f'Actual: {actual_clusters} clusters')
+    axes[0].set_xlabel('Max Nodes per Cluster', fontsize=12)
+    axes[0].set_ylabel('Number of Clusters', fontsize=12)
+    axes[0].set_title('Cluster Count vs Max Cluster Size', fontsize=14)
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # Inverse relationship (clusters vs max nodes)
+    axes[1].plot(cluster_counts, max_sizes, linewidth=2, color='green')
+    axes[1].set_xlabel('Number of Clusters', fontsize=12)
+    axes[1].set_ylabel('Max Nodes per Cluster', fontsize=12)
+    axes[1].set_title('Inverse Relationship: Clusters vs Max Size', fontsize=14)
+    axes[1].grid(True, alpha=0.3)
+    
+    if actual_clusters > 0:
+        axes[1].axvline(actual_clusters, color='red', linestyle='--', linewidth=2)
+        axes[1].plot(actual_clusters, current_max, 'ro', markersize=12)
+    
+    plt.tight_layout()
+    plt.savefig("max_nodes_vs_clusters.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: max_nodes_vs_clusters.png")
+
+
+# ============================================================================
+# TX POWER VS NETWORK LIFETIME
+# ============================================================================
+
+def plot_tx_power_vs_network_lifetime():
+    """Plot TX power vs network lifetime and energy consumption."""
+    print("  Generating TX power vs network lifetime plots...")
+    
+    # CC2420 specifications
+    tx_powers = [-25, -15, -10, -5, 0]  # dBm
+    tx_currents = [8.5, 9.9, 11.0, 14.0, 17.4]  # mA
+    voltage = 3.0
+    battery_energy = 21600  # Joules
+    data_rate = 250000  # bps
+    rx_current = 18.8  # mA
+    baseline_current = 0.0001  # A
+    
+    # Packet sizes to analyze
+    packet_sizes = [20, 50, 100, 127]  # bytes
+    packet_rate = 1.0  # packets per second
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('TX Power vs Network Lifetime Analysis', fontsize=16, fontweight='bold')
+    
+    # TX Power vs Energy per Packet
+    packet_size = 50  # bytes
+    energies_per_packet = []
+    for tx_current in tx_currents:
+        packet_time = (packet_size * 8) / data_rate
+        tx_energy = voltage * (tx_current / 1000.0) * packet_time
+        rx_energy = voltage * (rx_current / 1000.0) * packet_time
+        total_energy = tx_energy + rx_energy + (voltage * baseline_current * packet_time)
+        energies_per_packet.append(total_energy * 1e6)  # Convert to µJ
+    
+    axes[0, 0].plot(tx_powers, energies_per_packet, 'o-', linewidth=2, 
+                   markersize=10, color='red')
+    axes[0, 0].set_xlabel('TX Power (dBm)', fontsize=12)
+    axes[0, 0].set_ylabel('Energy per Packet (µJ)', fontsize=12)
+    axes[0, 0].set_title('TX Power vs Energy Consumption per Packet', fontsize=14)
+    axes[0, 0].grid(True, alpha=0.3)
+    for p, e in zip(tx_powers, energies_per_packet):
+        axes[0, 0].annotate(f'{e:.1f}µJ', (p, e), 
+                           textcoords="offset points", xytext=(0,10), ha='center')
+    
+    # TX Power vs Network Lifetime (different packet sizes)
+    for psize in packet_sizes:
+        lifetimes = []
+        for tx_current in tx_currents:
+            packet_time = (psize * 8) / data_rate
+            tx_energy_per_sec = voltage * (tx_current / 1000.0) * packet_time * packet_rate
+            rx_energy_per_sec = voltage * (rx_current / 1000.0) * packet_time * packet_rate
+            total_energy_per_sec = tx_energy_per_sec + rx_energy_per_sec + (voltage * baseline_current)
+            lifetime_hours = battery_energy / total_energy_per_sec / 3600
+            lifetimes.append(lifetime_hours)
+        
+        axes[0, 1].plot(tx_powers, lifetimes, 'o-', linewidth=2, 
+                       markersize=6, label=f'{psize} bytes')
+    
+    axes[0, 1].set_xlabel('TX Power (dBm)', fontsize=12)
+    axes[0, 1].set_ylabel('Network Lifetime (hours)', fontsize=12)
+    axes[0, 1].set_title('TX Power vs Network Lifetime\n(Different Packet Sizes)', fontsize=14)
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Energy efficiency (packets per Joule)
+    packets_per_joule = []
+    for energy in energies_per_packet:
+        packets_per_joule.append(1e6 / energy)  # packets per Joule
+    
+    axes[1, 0].plot(tx_powers, packets_per_joule, 's-', linewidth=2, 
+                   markersize=10, color='green')
+    axes[1, 0].set_xlabel('TX Power (dBm)', fontsize=12)
+    axes[1, 0].set_ylabel('Packets per Joule', fontsize=12)
+    axes[1, 0].set_title('Energy Efficiency vs TX Power', fontsize=14)
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Current consumption comparison
+    axes[1, 1].bar(range(len(tx_powers)), tx_currents, alpha=0.7, 
+                  color='orange', edgecolor='black')
+    axes[1, 1].set_xlabel('TX Power Level', fontsize=12)
+    axes[1, 1].set_ylabel('Current Consumption (mA)', fontsize=12)
+    axes[1, 1].set_title('TX Power vs Current Consumption (CC2420)', fontsize=14)
+    axes[1, 1].set_xticks(range(len(tx_powers)))
+    axes[1, 1].set_xticklabels([f'{p} dBm' for p in tx_powers])
+    axes[1, 1].grid(True, alpha=0.3, axis='y')
+    for i, curr in enumerate(tx_currents):
+        axes[1, 1].text(i, curr + 0.5, f'{curr}mA', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig("tx_power_vs_network_lifetime.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: tx_power_vs_network_lifetime.png")
+
+
+# ============================================================================
+# PACKET SIZE VS NETWORK LIFETIME
+# ============================================================================
+
+def plot_packet_size_vs_network_lifetime():
+    """Plot average bytes in packet vs network lifetime."""
+    print("  Generating packet size vs network lifetime plot...")
+    
+    # CC2420 specifications
+    voltage = 3.0
+    battery_energy = 21600  # Joules
+    data_rate = 250000  # bps
+    rx_current = 18.8  # mA
+    baseline_current = 0.0001  # A
+    
+    # Different TX power levels
+    tx_power_configs = [
+        (-25, 8.5),
+        (-15, 9.9),
+        (-10, 11.0),
+        (-5, 14.0),
+        (0, 17.4)
+    ]
+    
+    # Packet sizes from 20 to 200 bytes
+    packet_sizes = np.arange(20, 201, 5)
+    packet_rate = 1.0  # packets per second
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Packet Size vs Network Lifetime Analysis', fontsize=16, fontweight='bold')
+    
+    # Lifetime vs packet size for different TX powers
+    for tx_power, tx_current in tx_power_configs:
+        lifetimes = []
+        for psize in packet_sizes:
+            packet_time = (psize * 8) / data_rate
+            tx_energy_per_sec = voltage * (tx_current / 1000.0) * packet_time * packet_rate
+            rx_energy_per_sec = voltage * (rx_current / 1000.0) * packet_time * packet_rate
+            total_energy_per_sec = tx_energy_per_sec + rx_energy_per_sec + (voltage * baseline_current)
+            lifetime_hours = battery_energy / total_energy_per_sec / 3600
+            lifetimes.append(lifetime_hours)
+        
+        axes[0, 0].plot(packet_sizes, lifetimes, linewidth=2, 
+                       label=f'{tx_power} dBm', markersize=3)
+    
+    axes[0, 0].set_xlabel('Packet Size (bytes)', fontsize=12)
+    axes[0, 0].set_ylabel('Network Lifetime (hours)', fontsize=12)
+    axes[0, 0].set_title('Network Lifetime vs Packet Size\n(Different TX Power Levels)', fontsize=14)
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Energy per packet vs packet size
+    tx_power, tx_current = 0, 17.4  # Use max power for this plot
+    energies = []
+    for psize in packet_sizes:
+        packet_time = (psize * 8) / data_rate
+        tx_energy = voltage * (tx_current / 1000.0) * packet_time
+        rx_energy = voltage * (rx_current / 1000.0) * packet_time
+        total_energy = tx_energy + rx_energy + (voltage * baseline_current * packet_time)
+        energies.append(total_energy * 1e6)  # Convert to µJ
+    
+    axes[0, 1].plot(packet_sizes, energies, linewidth=2, color='red', marker='o', markersize=3)
+    axes[0, 1].set_xlabel('Packet Size (bytes)', fontsize=12)
+    axes[0, 1].set_ylabel('Energy per Packet (µJ)', fontsize=12)
+    axes[0, 1].set_title('Energy Consumption vs Packet Size', fontsize=14)
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Packets per battery vs packet size
+    packets_per_battery = []
+    for energy in energies:
+        packets_per_battery.append(battery_energy / (energy * 1e-6))
+    
+    axes[1, 0].plot(packet_sizes, packets_per_battery, linewidth=2, 
+                   color='green', marker='s', markersize=3)
+    axes[1, 0].set_xlabel('Packet Size (bytes)', fontsize=12)
+    axes[1, 0].set_ylabel('Packets per Battery', fontsize=12)
+    axes[1, 0].set_title('Total Packets Transmittable vs Packet Size', fontsize=14)
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].set_yscale('log')
+    
+    # Summary statistics
+    avg_packet_size = 50  # Default
+    packet_time = (avg_packet_size * 8) / data_rate
+    tx_energy_per_sec = voltage * (tx_current / 1000.0) * packet_time * packet_rate
+    rx_energy_per_sec = voltage * (rx_current / 1000.0) * packet_time * packet_rate
+    total_energy_per_sec = tx_energy_per_sec + rx_energy_per_sec + (voltage * baseline_current)
+    lifetime_hours = battery_energy / total_energy_per_sec / 3600
+    
+    summary_text = "PACKET SIZE ANALYSIS\n" + "="*40 + "\n\n"
+    summary_text += f"Average Packet Size: {avg_packet_size} bytes\n"
+    summary_text += f"TX Power: {tx_power} dBm\n"
+    summary_text += f"Packet Rate: {packet_rate} pkt/s\n\n"
+    summary_text += f"Energy per Packet: {energies[packet_sizes.tolist().index(50)]:.2f} µJ\n"
+    summary_text += f"Network Lifetime: {lifetime_hours:.2f} hours\n"
+    summary_text += f"Packets per Battery: {packets_per_battery[packet_sizes.tolist().index(50)]:.0f}\n\n"
+    summary_text += f"Battery Energy: {battery_energy/1000:.1f} kJ\n"
+    summary_text += f"Data Rate: {data_rate/1000:.0f} kbps"
+    
+    axes[1, 1].text(0.1, 0.5, summary_text, fontsize=11,
+                   verticalalignment='center', family='monospace',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    axes[1, 1].axis('off')
+    axes[1, 1].set_title('Summary Statistics', fontsize=14)
+    
+    plt.tight_layout()
+    plt.savefig("packet_size_vs_network_lifetime.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: packet_size_vs_network_lifetime.png")
+
+
+# ============================================================================
 # MAIN FUNCTION
 # ============================================================================
 
@@ -975,6 +1564,12 @@ def main():
         ("Packet Tracing", plot_packet_tracing),
         ("Protocol Metrics", plot_protocol_metrics),
         ("Config Parameters", plot_config_parameters),
+        ("Batch Simulation Averages", plot_batch_simulation_averages),
+        ("Packet Loss vs Join Time", plot_packet_loss_vs_join_time),
+        ("Config Parameters Over Time", plot_config_parameters_over_time),
+        ("Max Nodes vs Clusters", plot_max_nodes_vs_clusters),
+        ("TX Power vs Network Lifetime", plot_tx_power_vs_network_lifetime),
+        ("Packet Size vs Network Lifetime", plot_packet_size_vs_network_lifetime),
     ]
     
     results = {}
