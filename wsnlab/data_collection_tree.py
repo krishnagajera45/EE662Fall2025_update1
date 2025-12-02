@@ -2329,53 +2329,160 @@ class SensorNode(wsn.Node):
             if pck['type'] == 'PROBE':
                 # yield self.timeout(.5)
                 self.send_heart_beat()
-                # AGGRESSIVE: If we're REGISTERED and haven't received JOIN_REQUEST, become CH immediately
-                # This helps isolated UNREGISTERED nodes find a parent
-                if getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
-                    if len(self.received_JR_guis) == 0 and self.ch_addr is None:
-                        # Check if we've been REGISTERED for at least a few seconds
-                        if self.registered_since is not None and (self.now - self.registered_since) >= 5:
-                            self.log(f"[CH_CREATION] Node {self.id}: Received PROBE from {pck.get('gui')}, becoming CH immediately (no JOIN_REQUEST received)")
-                            write_log(self, f"[CH_CREATION] Node {self.id}: Becoming CLUSTER_HEAD proactively after receiving PROBE")
-                            
-                            # Self-assign a temporary cluster address (will be updated when ROOT responds)
-                            temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1  # Avoid 0 and 255
+                # REMOVED: Aggressive CH creation from PROBE messages
+                # REGISTERED nodes should stay REGISTERED unless they receive NETWORK_REPLY from ROOT
+                # This prevents every REGISTERED node from becoming a CH
+            if pck['type'] == 'JOIN_REQUEST':  # REGISTERED nodes can become CH if needed, but prefer forwarding
+                # Balanced approach: REGISTERED nodes can become CH when receiving JOIN_REQUEST,
+                # but only if their parent CH is full or they're far from ROOT
+                # This allows cluster formation while preventing excessive CH creation
+                if pck['gui'] not in self.received_JR_guis:
+                    self.received_JR_guis.append(pck['gui'])
+                    
+                    # If already a CH, process the JOIN_REQUEST directly
+                    if self.ch_addr is not None:
+                        child_gui = pck['gui']
+                        child_addr = self._assign_child_address(child_gui)
+                        if child_addr is not None:
+                            self.send_join_reply(child_gui, child_addr)
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
+                        else:
+                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+                    else:
+                        # REGISTERED but not CH: check if we should become CH or forward
+                        should_become_ch = False
+                        reason = ""
+                        
+                        # Check if parent CH is full (if we have a parent)
+                        if self.parent_gui is not None:
+                            parent_info = self.neighbors_table.get(self.parent_gui)
+                            if parent_info:
+                                parent_role = parent_info.get('role')
+                                # If parent is CH or ROOT, check if it's full
+                                if parent_role in (Roles.CLUSTER_HEAD, Roles.ROOT):
+                                    # Try to find parent node to check if it's full
+                                    parent_node = self._find_node_by_gui(self.parent_gui)
+                                    if parent_node and hasattr(parent_node, 'node_addr_pool'):
+                                        current_children = sum(1 for assigned_gui in parent_node.node_addr_pool.values() 
+                                                             if assigned_gui is not None)
+                                        if current_children >= config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER:
+                                            should_become_ch = True
+                                            reason = f"parent CH {self.parent_gui} is full ({current_children}/{config.MAX_CHILD_NODES_ALLOWED_PER_CLUSTER})"
+                                else:
+                                    # Parent is not CH/ROOT - become CH
+                                    should_become_ch = True
+                                    reason = f"parent {self.parent_gui} is not CH/ROOT (role={parent_role})"
+                            else:
+                                # Parent not in neighbors_table - become CH
+                                should_become_ch = True
+                                reason = f"parent {self.parent_gui} not in neighbors_table"
+                        else:
+                            # No parent - become CH to accept the child (needed for cluster formation)
+                            should_become_ch = True
+                            reason = "no parent available"
+                        
+                        # Check hop count - if we're far from ROOT (high hop count), become CH to reduce latency
+                        # But only if we haven't already decided to become CH
+                        if not should_become_ch and self.hop_count is not None and self.hop_count >= 4:
+                            should_become_ch = True
+                            reason = f"far from ROOT (hop_count={self.hop_count}, reducing latency)"
+                        
+                        if should_become_ch:
+                            # Become CH to accept the child
+                            write_log(self, f"[CH_CREATION] Node {self.id}: Received JOIN_REQUEST from {pck['gui']}, becoming CH ({reason})")
+                            # Self-assign temporary cluster address
+                            temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
                             self.ch_addr = wsn.Addr(temp_cluster_id, 254)
-                            self.set_role(Roles.CLUSTER_HEAD, reason="proactive CH creation from PROBE")
+                            self.set_role(Roles.CLUSTER_HEAD, reason=f"CH creation for JOIN_REQUEST: {reason}")
                             self._init_address_pool()
                             
-                            # Send heartbeats immediately so UNREGISTERED nodes can discover us
+                            # Send heartbeats immediately
                             self.send_heart_beat()
                             if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
                                 self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
                                 self.heartbeat_timer_active = True
                             
-                            # Still send NETWORK_REQUEST to ROOT to get official cluster address
-                            self.send_network_request()
-                            
                             # Start neighbor sharing if enabled
                             if config.ENABLE_MULTIHOP_DISCOVERY:
                                 self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
-            if pck['type'] == 'JOIN_REQUEST':  # it sends a network request to the root
-                # CRITICAL FIX: REGISTERED nodes should forward JOIN_REQUEST to their parent
-                # OR immediately become CLUSTER_HEAD to accept children
-                # Avoid duplicates in received_JR_guis
-                if pck['gui'] not in self.received_JR_guis:
-                    self.received_JR_guis.append(pck['gui'])
+                            
+                            # Request official cluster address from ROOT
+                            self.send_network_request()
+                            
+                            # Accept the child
+                            child_gui = pck['gui']
+                            child_addr = self._assign_child_address(child_gui)
+                            if child_addr is not None:
+                                self.send_join_reply(child_gui, child_addr)
+                                write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
+                            else:
+                                write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+                        else:
+                            # Forward to parent (CH or ROOT)
+                            parent_info = self.neighbors_table.get(self.parent_gui)
+                            if parent_info:
+                                parent_addr = parent_info.get('ch_addr') or parent_info.get('addr')
+                                if parent_addr:
+                                    # Forward JOIN_REQUEST to parent
+                                    forward_pck = pck.copy()
+                                    forward_pck['source'] = self.addr
+                                    forward_pck['gui'] = pck['gui']  # Keep original requester's GUI
+                                    forward_pck['forwarded_by'] = self.id  # Track who forwarded it
+                                    self.route_and_forward_package(forward_pck)
+                                    write_log(self, f"[JOIN] Node {self.id}: Forwarding JOIN_REQUEST from {pck['gui']} to parent {self.parent_gui}")
+                                else:
+                                    # Parent has no address - become CH as fallback
+                                    write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} has no address, becoming CH as fallback")
+                                    temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                                    self.ch_addr = wsn.Addr(temp_cluster_id, 254)
+                                    self.set_role(Roles.CLUSTER_HEAD, reason="parent has no address - fallback CH")
+                                    self._init_address_pool()
+                                    self.send_heart_beat()
+                                    if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+                                        self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                                        self.heartbeat_timer_active = True
+                                    if config.ENABLE_MULTIHOP_DISCOVERY:
+                                        self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                                    self.send_network_request()
+                                    child_gui = pck['gui']
+                                    child_addr = self._assign_child_address(child_gui)
+                                    if child_addr is not None:
+                                        self.send_join_reply(child_gui, child_addr)
+                            else:
+                                # Parent not in neighbors_table - become CH as fallback
+                                write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} not in neighbors_table, becoming CH as fallback")
+                                temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                                self.ch_addr = wsn.Addr(temp_cluster_id, 254)
+                                self.set_role(Roles.CLUSTER_HEAD, reason="parent not in neighbors_table - fallback CH")
+                                self._init_address_pool()
+                                self.send_heart_beat()
+                                if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+                                    self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                                    self.heartbeat_timer_active = True
+                                if config.ENABLE_MULTIHOP_DISCOVERY:
+                                    self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                                self.send_network_request()
+                                child_gui = pck['gui']
+                                child_addr = self._assign_child_address(child_gui)
+                                if child_addr is not None:
+                                    self.send_join_reply(child_gui, child_addr)
+            if pck['type'] == 'TRIGGER_CH_CREATION':  # Request from UNREGISTERED node to become CH
+                # CRITICAL: REGISTERED nodes should respond to TRIGGER_CH_CREATION by becoming CH
+                # This breaks the deadlock where UNREGISTERED nodes can't find parents
+                # Check if this trigger is for us (either no target_gui specified, or target_gui matches our id)
+                target_gui = pck.get('target_gui')
+                if target_gui is None or target_gui == self.id:
+                    # Only respond if we haven't become CH yet
                     if self.ch_addr is None:
-                        # CRITICAL FIX: REGISTERED nodes should become CLUSTER_HEAD immediately
-                        # Don't wait for ROOT's NETWORK_REPLY - become CH proactively to accept children
-                        # This is especially important for nodes that are far from ROOT but close to UNREGISTERED nodes
-                        write_log(self, f"[CH_CREATION] Node {self.id}: Received JOIN_REQUEST from {pck['gui']}, becoming CLUSTER_HEAD immediately (self-assigning cluster address)")
-                        
-                        # Self-assign a temporary cluster address (will be updated when ROOT responds)
-                        # Use a unique cluster ID based on node ID to avoid conflicts
-                        temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1  # Avoid 0 and 255
+                        # Become CH to help UNREGISTERED nodes join
+                        write_log(self, f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head to help UNREGISTERED nodes")
+                        # Self-assign temporary cluster address
+                        temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
                         self.ch_addr = wsn.Addr(temp_cluster_id, 254)
-                        self.set_role(Roles.CLUSTER_HEAD, reason="immediate CH creation for JOIN_REQUEST")
+                        self.set_role(Roles.CLUSTER_HEAD, reason="TRIGGER_CH_CREATION from UNREGISTERED node")
                         self._init_address_pool()
                         
-                        # Send heartbeats immediately so other UNREGISTERED nodes can discover us
+                        # Send heartbeats immediately so UNREGISTERED nodes can discover us
                         self.send_heart_beat()
                         if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
                             self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
@@ -2385,39 +2492,11 @@ class SensorNode(wsn.Node):
                         if config.ENABLE_MULTIHOP_DISCOVERY:
                             self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
                         
-                        # Still send NETWORK_REQUEST to ROOT to get official cluster address
-                        # ROOT will assign a proper cluster ID in NETWORK_REPLY
-                        self.send_network_request()
-                        
-                        # Now we can accept the child immediately
-                        child_gui = pck['gui']
-                        child_addr = self._assign_child_address(child_gui)
-                        if child_addr is not None:
-                            self.send_join_reply(child_gui, child_addr)
-                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)}) immediately after becoming CH")
-                        else:
-                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
-                    else:
-                        # Already a CH - can send JOIN_REPLY directly
-                        # Process this JOIN_REQUEST immediately
-                        child_gui = pck['gui']
-                        child_addr = self._assign_child_address(child_gui)
-                        if child_addr is not None:
-                            self.send_join_reply(child_gui, child_addr)
-                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
-                        else:
-                            write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
-            if pck['type'] == 'TRIGGER_CH_CREATION':  # Request from UNREGISTERED node to become CH
-                # Check if this trigger is for us (either no target_gui specified, or target_gui matches our id)
-                target_gui = pck.get('target_gui')
-                if target_gui is None or target_gui == self.id:
-                    # Only respond if we haven't received JOIN_REQUEST and haven't become CH yet
-                    if len(self.received_JR_guis) == 0 and self.ch_addr is None:
-                        self.log(f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head")
+                        # Request official cluster address from ROOT
                         self.send_network_request()
                     else:
                         if config.ENABLE_CLUSTER_DEBUG:
-                            self.log(f"[CH_CREATION] Node {self.id}: Ignored TRIGGER_CH_CREATION - already has JOIN_REQUEST ({len(self.received_JR_guis)}) or CH address ({self.ch_addr})")
+                            self.log(f"[CH_CREATION] Node {self.id}: Ignored TRIGGER_CH_CREATION - already CH (ch_addr={format_addr(self.ch_addr)})")
             if pck['type'] == 'NETWORK_REPLY':  # it becomes cluster head and send join reply to the candidates
                 # If we already have a ch_addr (self-assigned), update it with ROOT's official address
                 if self.ch_addr is not None:
@@ -2860,15 +2939,27 @@ class SensorNode(wsn.Node):
                 if config.ENABLE_CLUSTER_DEBUG:
                     self.log(f"[CH_TRANSFER] Node {self.id}: TIMER_CH_TRANSFER_DELAY fired but conditions not met (role={self.role}, enabled={self.ch_transfer_enabled}, is_root={self.id == ROOT_ID})")
         elif name == 'TIMER_PROACTIVE_CH':
-            # Proactive CH creation: REGISTERED node becomes CH if no JOIN_REQUEST received
-            proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 15)
+            # Proactive CH creation: REGISTERED node becomes CH ONLY if truly isolated (no parent)
+            # This prevents every REGISTERED node from becoming a CH
+            proactive_timer = getattr(config, 'PROACTIVE_CH_TIMER', 60)
             if self.role == Roles.REGISTERED and getattr(config, 'ENABLE_PROACTIVE_CH_CREATION', True):
-                if len(self.received_JR_guis) == 0 and self.ch_addr is None:
-                    self.log(f"[CH_CREATION] Node {self.id}: Proactive CH creation - no JOIN_REQUEST received after {proactive_timer}s, becoming cluster head")
+                # Only become CH if:
+                # 1. No JOIN_REQUEST received
+                # 2. No CH address assigned
+                # 3. No parent available (truly isolated)
+                if len(self.received_JR_guis) == 0 and self.ch_addr is None and self.parent_gui is None:
+                    self.log(f"[CH_CREATION] Node {self.id}: Proactive CH creation - isolated REGISTERED node (no parent, no JOIN_REQUEST) after {proactive_timer}s, becoming cluster head")
                     self.send_network_request()
                 else:
                     if config.ENABLE_CLUSTER_DEBUG:
-                        self.log(f"[CH_CREATION] Node {self.id}: Proactive CH timer fired but already has JOIN_REQUEST ({len(self.received_JR_guis)}) or CH address ({self.ch_addr})")
+                        reason = []
+                        if len(self.received_JR_guis) > 0:
+                            reason.append(f"has {len(self.received_JR_guis)} JOIN_REQUESTs")
+                        if self.ch_addr is not None:
+                            reason.append("already CH")
+                        if self.parent_gui is not None:
+                            reason.append(f"has parent {self.parent_gui}")
+                        self.log(f"[CH_CREATION] Node {self.id}: Proactive CH timer fired but skipped ({', '.join(reason)})")
             # Reschedule timer
             self.set_timer('TIMER_PROACTIVE_CH', proactive_timer)
         

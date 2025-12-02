@@ -76,8 +76,8 @@ ENABLE_CH_TRANSFER = True  # Enable CH role transfer to reduce cluster overlap
 MIN_MEMBERS_FOR_TRANSFER = 1  # Minimum members before CH can transfer role (allows early transfer to reduce overlap)
 
 ## cluster head creation properties
-ENABLE_PROACTIVE_CH_CREATION = True  # Allow REGISTERED nodes to proactively become cluster heads
-PROACTIVE_CH_TIMER = 15  # Time (seconds) after registration before REGISTERED node can become CH if no JOIN_REQUEST received (aggressive)
+ENABLE_PROACTIVE_CH_CREATION = True  # Allow REGISTERED nodes to proactively become cluster heads (enabled for isolated nodes)
+PROACTIVE_CH_TIMER = 60  # Time (seconds) after registration before isolated REGISTERED node can become CH (only if no parent available)
 UNREGISTERED_CH_TRIGGER_THRESHOLD = 3  # Number of failed join attempts before UNREGISTERED node triggers CH creation (reduced spam)
 
 ## energy model properties (CC2420 radio)
