@@ -859,6 +859,28 @@ class SensorNode(wsn.Node):
     def set_role(self, new_role, *, recolor=True, reason=""):
         """Central place to switch roles, keep tallies, and (optionally) recolor."""
         old_role = getattr(self, "role", None)
+        
+        # CRITICAL: If becoming CH, check for duplicate CHs with same cluster ID BEFORE setting role
+        # If found, become router instead to prevent multiple CHs in same cluster
+        if new_role == Roles.CLUSTER_HEAD and self.ch_addr is not None:
+            cluster_id = self.ch_addr.net_addr
+            existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(cluster_id)
+            if existing_ch and existing_ch_gui != self.id:
+                # Another CH already exists with this cluster ID
+                # Check which one should be CH (prefer the one with more members or lower ID)
+                existing_ch_node = self._find_node_by_gui(existing_ch_gui)
+                if existing_ch_node:
+                    existing_members = len(existing_ch_node.members_table) if hasattr(existing_ch_node, 'members_table') else 0
+                    my_members = len(self.members_table) if hasattr(self, 'members_table') else 0
+                    
+                    # If existing CH has more members, or same members but lower ID, we become router
+                    if existing_members > my_members or (existing_members == my_members and existing_ch_gui < self.id):
+                        write_log(self, f"[CH_DUPLICATE] Node {self.id}: CH {existing_ch_gui} already exists with cluster {cluster_id} (members: {existing_members} vs {my_members}), becoming router instead")
+                        self.ch_addr = None  # Clear CH address
+                        # Recursively call set_role with ROUTER instead
+                        self.set_role(Roles.ROUTER, reason=f"Duplicate CH detected - existing CH {existing_ch_gui} has cluster {cluster_id}")
+                        return  # Exit early, role already changed to ROUTER
+        
         if old_role is not None:
             ROLE_COUNTS[old_role] -= 1
             if ROLE_COUNTS[old_role] <= 0:
@@ -1221,6 +1243,23 @@ class SensorNode(wsn.Node):
             if node.id == gui:
                 return node
         return None
+    
+    def _check_existing_ch_in_cluster(self, cluster_id):
+        """Check if there's already a CH with the same cluster ID in neighbors.
+        
+        Returns:
+            (bool, int): (True if CH exists, GUI of existing CH) or (False, None)
+        """
+        for neighbor_gui, neighbor_info in self.neighbors_table.items():
+            neighbor_role = neighbor_info.get('role')
+            neighbor_ch_addr = neighbor_info.get('ch_addr')
+            
+            # Check if neighbor is a CH with the same cluster ID
+            if neighbor_role == Roles.CLUSTER_HEAD and neighbor_ch_addr is not None:
+                if hasattr(neighbor_ch_addr, 'net_addr') and neighbor_ch_addr.net_addr == cluster_id:
+                    return True, neighbor_gui
+        
+        return False, None
 
     def become_unregistered(self):
         if self.role != Roles.UNDISCOVERED:
@@ -2388,10 +2427,27 @@ class SensorNode(wsn.Node):
                             reason = f"far from ROOT (hop_count={self.hop_count}, reducing latency)"
                         
                         if should_become_ch:
-                            # Become CH to accept the child
-                            write_log(self, f"[CH_CREATION] Node {self.id}: Received JOIN_REQUEST from {pck['gui']}, becoming CH ({reason})")
                             # Self-assign temporary cluster address
                             temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                            
+                            # CRITICAL: Check if there's already a CH with this cluster ID in neighbors
+                            existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
+                            if existing_ch:
+                                # Forward JOIN_REQUEST to existing CH instead of creating duplicate
+                                existing_ch_info = self.neighbors_table.get(existing_ch_gui)
+                                if existing_ch_info:
+                                    existing_ch_addr = existing_ch_info.get('ch_addr') or existing_ch_info.get('addr')
+                                    if existing_ch_addr:
+                                        forward_pck = pck.copy()
+                                        forward_pck['source'] = self.addr
+                                        forward_pck['gui'] = pck['gui']
+                                        forward_pck['dest'] = existing_ch_addr
+                                        self.route_and_forward_package(forward_pck)
+                                        write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} already exists with cluster {temp_cluster_id}, forwarding JOIN_REQUEST to it")
+                                        return
+                            
+                            # Become CH to accept the child
+                            write_log(self, f"[CH_CREATION] Node {self.id}: Received JOIN_REQUEST from {pck['gui']}, becoming CH ({reason})")
                             self.ch_addr = wsn.Addr(temp_cluster_id, 254)
                             self.set_role(Roles.CLUSTER_HEAD, reason=f"CH creation for JOIN_REQUEST: {reason}")
                             self._init_address_pool()
@@ -2430,10 +2486,28 @@ class SensorNode(wsn.Node):
                                     forward_pck['forwarded_by'] = self.id  # Track who forwarded it
                                     self.route_and_forward_package(forward_pck)
                                     write_log(self, f"[JOIN] Node {self.id}: Forwarding JOIN_REQUEST from {pck['gui']} to parent {self.parent_gui}")
+                                    return  # Done forwarding, exit early
                                 else:
                                     # Parent has no address - become CH as fallback
-                                    write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} has no address, becoming CH as fallback")
                                     temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                                    
+                                    # Check if there's already a CH with this cluster ID
+                                    existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
+                                    if existing_ch:
+                                        # Forward to existing CH instead
+                                        existing_ch_info = self.neighbors_table.get(existing_ch_gui)
+                                        if existing_ch_info:
+                                            existing_ch_addr = existing_ch_info.get('ch_addr') or existing_ch_info.get('addr')
+                                            if existing_ch_addr:
+                                                forward_pck = pck.copy()
+                                                forward_pck['source'] = self.addr
+                                                forward_pck['gui'] = pck['gui']
+                                                forward_pck['dest'] = existing_ch_addr
+                                                self.route_and_forward_package(forward_pck)
+                                                write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} exists with cluster {temp_cluster_id}, forwarding JOIN_REQUEST")
+                                                return
+                                    
+                                    write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} has no address, becoming CH as fallback")
                                     self.ch_addr = wsn.Addr(temp_cluster_id, 254)
                                     self.set_role(Roles.CLUSTER_HEAD, reason="parent has no address - fallback CH")
                                     self._init_address_pool()
@@ -2448,10 +2522,31 @@ class SensorNode(wsn.Node):
                                     child_addr = self._assign_child_address(child_gui)
                                     if child_addr is not None:
                                         self.send_join_reply(child_gui, child_addr)
+                                        write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
+                                    else:
+                                        write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+                                    return  # Done handling fallback CH creation
                             else:
                                 # Parent not in neighbors_table - become CH as fallback
-                                write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} not in neighbors_table, becoming CH as fallback")
                                 temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                                
+                                # Check if there's already a CH with this cluster ID
+                                existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
+                                if existing_ch:
+                                    # Forward to existing CH instead
+                                    existing_ch_info = self.neighbors_table.get(existing_ch_gui)
+                                    if existing_ch_info:
+                                        existing_ch_addr = existing_ch_info.get('ch_addr') or existing_ch_info.get('addr')
+                                        if existing_ch_addr:
+                                            forward_pck = pck.copy()
+                                            forward_pck['source'] = self.addr
+                                            forward_pck['gui'] = pck['gui']
+                                            forward_pck['dest'] = existing_ch_addr
+                                            self.route_and_forward_package(forward_pck)
+                                            write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} exists with cluster {temp_cluster_id}, forwarding JOIN_REQUEST")
+                                            return
+                                
+                                write_log(self, f"[CH_CREATION] Node {self.id}: Parent {self.parent_gui} not in neighbors_table, becoming CH as fallback")
                                 self.ch_addr = wsn.Addr(temp_cluster_id, 254)
                                 self.set_role(Roles.CLUSTER_HEAD, reason="parent not in neighbors_table - fallback CH")
                                 self._init_address_pool()
@@ -2466,6 +2561,10 @@ class SensorNode(wsn.Node):
                                 child_addr = self._assign_child_address(child_gui)
                                 if child_addr is not None:
                                     self.send_join_reply(child_gui, child_addr)
+                                    write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Sent JOIN_REPLY to child {child_gui} (addr={format_addr(child_addr)})")
+                                else:
+                                    write_log(self, f"[CLUSTER_SIZE] Node {self.id}: Cluster full, cannot accept child {child_gui}")
+                                return  # Done handling fallback CH creation
             if pck['type'] == 'TRIGGER_CH_CREATION':  # Request from UNREGISTERED node to become CH
                 # CRITICAL: REGISTERED nodes should respond to TRIGGER_CH_CREATION by becoming CH
                 # This breaks the deadlock where UNREGISTERED nodes can't find parents
@@ -2474,10 +2573,18 @@ class SensorNode(wsn.Node):
                 if target_gui is None or target_gui == self.id:
                     # Only respond if we haven't become CH yet
                     if self.ch_addr is None:
-                        # Become CH to help UNREGISTERED nodes join
-                        write_log(self, f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head to help UNREGISTERED nodes")
                         # Self-assign temporary cluster address
                         temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                        
+                        # Check if there's already a CH with this cluster ID
+                        existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
+                        if existing_ch:
+                            # Don't become CH if one already exists - let existing CH handle it
+                            write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} already exists with cluster {temp_cluster_id}, not creating duplicate")
+                            return
+                        
+                        # Become CH to help UNREGISTERED nodes join
+                        write_log(self, f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head to help UNREGISTERED nodes")
                         self.ch_addr = wsn.Addr(temp_cluster_id, 254)
                         self.set_role(Roles.CLUSTER_HEAD, reason="TRIGGER_CH_CREATION from UNREGISTERED node")
                         self._init_address_pool()

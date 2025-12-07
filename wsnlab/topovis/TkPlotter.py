@@ -41,8 +41,16 @@ class Plotter(GenericPlotter):
     ###################
     def setTime(self, time):
         if (time - self.lastShownTime > 0.05):
-            self.canvas.itemconfigure(self.timeText, text='Time: %.2fS' % time)
-            self.lastShownTime = time
+            try:
+                self.canvas.itemconfigure(self.timeText, text='Time: %.2fS' % time)
+                self.lastShownTime = time
+            except Exception as e:
+                # GUI window was closed - ignore the error
+                # This is harmless, simulation continues without visualization
+                if "invalid command name" in str(e) or "TclError" in str(type(e).__name__):
+                    pass  # Silently ignore when canvas is destroyed
+                else:
+                    raise  # Re-raise other exceptions
 
     ###################
     def updateNodePosAndSize(self,id):

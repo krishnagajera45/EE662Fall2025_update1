@@ -180,7 +180,16 @@ class Simulator(wsnlab.Simulator):
            Returns:
         """
         while True:
-            self.scene.setTime(self.now)
+            try:
+                self.scene.setTime(self.now)
+            except Exception as e:
+                # GUI window was closed - stop updating time
+                # This is harmless, simulation continues without visualization
+                if "invalid command name" in str(e) or "TclError" in str(type(e).__name__):
+                    break  # Exit the loop when GUI is closed
+                else:
+                    # Re-raise other exceptions
+                    raise
             yield self.timeout(0.1)
 
     def run(self):
