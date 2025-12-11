@@ -930,6 +930,50 @@ class SensorNode(wsn.Node):
             return  # Only CHs can become routers, and ROOT never becomes router
         
         prev_ch_addr = self.ch_addr
+        
+        # CRITICAL: Orphan all children before becoming router
+        # Routers cannot accept children, so children must find new parents
+        # BUT: Don't orphan the node that just accepted CH transfer (it's now a CH, not a child)
+        orphan_count = 0
+        
+        # Method 1: Orphan nodes in members_table (children that sent JOIN_ACK)
+        for child_addr in list(self.members_table):
+            child_node = self._find_node_by_addr(child_addr)
+            if child_node and not child_node.is_failed:
+                # Skip if this child has already become a CH (it accepted the transfer)
+                if child_node.role == Roles.CLUSTER_HEAD:
+                    if config.ENABLE_CLUSTER_DEBUG:
+                        self.log(f"[ROUTER] Node {self.id}: Skipping orphan of {child_node.id} - already CH (accepted transfer)")
+                    continue  # Don't orphan the new CH
+                child_node.become_orphan(f"Parent node {self.id} became router (cannot accept children)")
+                orphan_count += 1
+        
+        # Method 2: Also orphan nodes that have us as parent_gui but aren't in members_table yet
+        # This handles the case where a node registered but JOIN_ACK hasn't been processed yet
+        for node in ALL_NODES:
+            if node.id == self.id or node.is_failed:
+                continue
+            # Check if this node has us as parent
+            if hasattr(node, 'parent_gui') and node.parent_gui == self.id:
+                # Skip if this node has already become a CH (it accepted the transfer)
+                if node.role == Roles.CLUSTER_HEAD:
+                    if config.ENABLE_CLUSTER_DEBUG:
+                        self.log(f"[ROUTER] Node {self.id}: Skipping orphan of {node.id} - already CH (accepted transfer)")
+                    continue
+                # Check if node is already orphaned (avoid double-orphaning)
+                if node.role != Roles.UNREGISTERED:
+                    # Only orphan if node is REGISTERED (has valid parent relationship)
+                    if node.role == Roles.REGISTERED:
+                        node.become_orphan(f"Parent node {self.id} became router (cannot accept children)")
+                        orphan_count += 1
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[ROUTER] Node {self.id}: Orphaned {node.id} (had us as parent_gui but not in members_table)")
+        
+        # Clear members table and address pool (router has no cluster)
+        self.members_table = []
+        if hasattr(self, 'node_addr_pool'):
+            self.node_addr_pool = {}
+        
         self.ch_addr = None  # Router doesn't have its own cluster
         self.set_role(Roles.ROUTER, reason=reason)
         
@@ -940,8 +984,8 @@ class SensorNode(wsn.Node):
             self.heartbeat_timer_active = True
         
         if config.ENABLE_CLUSTER_DEBUG:
-            self.log(f"[ROUTER] Node {self.id} became ROUTER (prev_ch={format_addr(prev_ch_addr)})")
-            write_log(self, f"[ROUTER] Node {self.id} activated as router")
+            self.log(f"[ROUTER] Node {self.id} became ROUTER (prev_ch={format_addr(prev_ch_addr)}, orphaned {orphan_count} children)")
+            write_log(self, f"[ROUTER] Node {self.id} activated as router (orphaned {orphan_count} children)")
     
     def find_farthest_member(self):
         """
@@ -2338,6 +2382,24 @@ class SensorNode(wsn.Node):
                 is_for_us = (addr_equals(pck.get('dest'), self.addr) or 
                             addr_equals(pck.get('dest'), self.ch_addr))
                 if is_for_us and self.ch_transfer_in_progress and pck.get('gui') == self.ch_transfer_candidate:
+                    # CRITICAL: Remove the new CH from members_table before becoming router
+                    # The new CH is no longer a child - it's now a peer CH
+                    new_ch_gui = pck.get('gui')
+                    new_ch_node = self._find_node_by_gui(new_ch_gui)
+                    if new_ch_node and new_ch_node.addr is not None:
+                        # Remove from members_table if present
+                        if new_ch_node.addr in self.members_table:
+                            self.members_table.remove(new_ch_node.addr)
+                            if config.ENABLE_CLUSTER_DEBUG:
+                                self.log(f"[CH_TRANSFER] Node {self.id}: Removed new CH {new_ch_gui} from members_table before becoming router")
+                        # Also remove from address pool if present
+                        if hasattr(self, 'node_addr_pool'):
+                            for node_addr, assigned_gui in list(self.node_addr_pool.items()):
+                                if assigned_gui == new_ch_gui:
+                                    self.node_addr_pool[node_addr] = None
+                                    if config.ENABLE_CLUSTER_DEBUG:
+                                        self.log(f"[CH_TRANSFER] Node {self.id}: Freed address slot {node_addr} (new CH {new_ch_gui})")
+                    
                     if config.ENABLE_CLUSTER_DEBUG:
                         self.log(f"[CH_TRANSFER] Node {self.id} received CH_TRANSFER_ACK from {pck.get('gui')}, becoming router")
                         write_log(self, f"[CH_TRANSFER] Node {self.id} received ACK from {pck.get('gui')}, becoming router")
@@ -2753,8 +2815,18 @@ class SensorNode(wsn.Node):
                 self.process_neighbor_share(pck)
             if pck['type'] == 'JOIN_REPLY':  # it becomes registered and sends join ack if the message is sent to itself once received join reply
                 if pck['dest_gui'] == self.id:
+                    sender_gui = pck.get('gui')
+                    # CRITICAL: Validate sender is a valid parent (CH or ROOT, not ROUTER)
+                    sender_node = self._find_node_by_gui(sender_gui)
+                    if sender_node and sender_node.role not in (Roles.CLUSTER_HEAD, Roles.ROOT):
+                        # Reject JOIN_REPLY from invalid parent (ROUTER or REGISTERED)
+                        if config.ENABLE_CLUSTER_DEBUG:
+                            self.log(f"[JOIN] Node {self.id}: Rejecting JOIN_REPLY from {sender_gui} (invalid role: {sender_node.role})")
+                            write_log(self, f"[JOIN] Node {self.id}: Rejecting JOIN_REPLY from {sender_gui} (role={sender_node.role}, must be CH or ROOT)")
+                        return  # Don't register with invalid parent
+                    
                     self.addr = pck['addr']
-                    self.parent_gui = pck['gui']
+                    self.parent_gui = sender_gui
                     self.root_addr = pck['root_addr']
                     self.hop_count = pck['hop_count']
                     self.registered_time = self.now

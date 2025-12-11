@@ -144,15 +144,12 @@ idea/*
 Cluster_Tree_Mesh
 wsn_debug.log
 *.pdf
-
-
-Neighbor_Table_Analysis.md
 *.md
 !README.md
 *.png
 .gitignore
-network_lifetime.png
-tx_power_analysis.png
 batch_simulation_results/aggregated_statistics.json
 .gitignore
 batch_simulation_results/
+*docs
+
