@@ -50,8 +50,10 @@ ENABLE_NEIGHBOR_DEBUG = True  # Toggle for neighbor discovery debug logs
 ENABLE_LOG_FILE = True  # Write simulation events to a timestamped log
 ENABLE_ROUTING_DEBUG = True  # Mesh/tree routing debug statements
 ENABLE_CLUSTER_DEBUG = True  # Cluster/member table debug statements
-ENABLE_MESH_ROUTING = True  # Try mesh routing first
-ENABLE_TREE_ROUTING = True  # Fall back to tree routing
+ENABLE_MESH_ROUTING = True  # Enable mesh routing (try mesh first, then tree)
+ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh fails)
+# Note: If ENABLE_MESH_ROUTING = False, only tree routing will be used
+#       If ENABLE_TREE_ROUTING = False, only mesh routing will be used (may fail if no mesh route)
 ENABLE_PACKET_VISUALIZATION = False  # Visualize data packets as they travel through network
 PACKET_TRACE_DURATION = 10.0  # How long to keep packet trace lines visible (seconds)
 

@@ -1929,109 +1929,121 @@ class SensorNode(wsn.Node):
 
         path_str = "UNKNOWN"  # default
 
-        # STEP 1: MESH ROUTING - Check neighbors_table for direct neighbor match
-        neighbor_match = next(
-            (entry for entry in self.neighbors_table.values() 
-             if addr_equals(entry.get('addr'), dest) or addr_equals(entry.get('ch_addr'), dest)),
-            None
-        )
-
-        # STEP 2: MESH ROUTING - Check multihop_neighbor_table for multi-hop neighbor
-        multihop_match = None
-        if neighbor_match is None and config.ENABLE_MULTIHOP_DISCOVERY:
-            multihop_match = next(
-                (info for gui, info in self.multihop_neighbor_table.items() 
-                 if addr_equals(info.get('addr'), dest)),
+        # MESH ROUTING (Steps 1-3) - Only if enabled
+        if config.ENABLE_MESH_ROUTING:
+            # STEP 1: MESH ROUTING - Check neighbors_table for direct neighbor match
+            neighbor_match = next(
+                (entry for entry in self.neighbors_table.values() 
+                 if addr_equals(entry.get('addr'), dest) or addr_equals(entry.get('ch_addr'), dest)),
                 None
             )
-            if multihop_match:
-                next_gui = multihop_match.get('next_hop')
-                next_entry = self.neighbors_table.get(next_gui)
-                if next_entry:
-                    next_addr = next_entry.get('addr')
-                    if next_addr is not None:
-                        pck['next_hop'] = next_addr
-                        path_str = f"MESH_{multihop_match.get('hop_dist', 2)}H"
-                        self._record_route(pck, path_str, next_addr)
-                        self.send(pck)
-                    return
 
-        # STEP 3: MESH ROUTING - Direct neighbor (1-hop)
-        if neighbor_match:
-            # CRITICAL: Don't route to ourselves
-            if addr_equals(dest, self.addr):
-                # Packet is for ourselves - already being processed, don't route
-                if config.ENABLE_ROUTING_DEBUG:
-                    self.log(f"[ROUTING] Node {self.id}: Mesh routing detected packet for self, not routing")
-                return
-            
-            # Mesh routing if neighbor_hop_count > 1, else direct
-            if neighbor_match.get('neighbor_hop_count', 1) > 1:
-                next_hop_gui = neighbor_match.get('next_hop')
-                if next_hop_gui:
-                    next_hop_entry = self.neighbors_table.get(next_hop_gui)
-                    if next_hop_entry:
-                        pck['next_hop'] = next_hop_entry.get('addr', dest)
-                        path_str = "MESH"
+            # STEP 2: MESH ROUTING - Check multihop_neighbor_table for multi-hop neighbor
+            multihop_match = None
+            if neighbor_match is None and config.ENABLE_MULTIHOP_DISCOVERY:
+                multihop_match = next(
+                    (info for gui, info in self.multihop_neighbor_table.items() 
+                     if addr_equals(info.get('addr'), dest)),
+                    None
+                )
+                if multihop_match:
+                    next_gui = multihop_match.get('next_hop')
+                    next_entry = self.neighbors_table.get(next_gui)
+                    if next_entry:
+                        next_addr = next_entry.get('addr')
+                        if next_addr is not None:
+                            pck['next_hop'] = next_addr
+                            path_str = f"MESH_{multihop_match.get('hop_dist', 2)}H"
+                            self._record_route(pck, path_str, next_addr)
+                            self.send(pck)
+                        return
+
+            # STEP 3: MESH ROUTING - Direct neighbor (1-hop)
+            if neighbor_match:
+                # CRITICAL: Don't route to ourselves
+                if addr_equals(dest, self.addr):
+                    # Packet is for ourselves - already being processed, don't route
+                    if config.ENABLE_ROUTING_DEBUG:
+                        self.log(f"[ROUTING] Node {self.id}: Mesh routing detected packet for self, not routing")
+                    return
+                
+                # Mesh routing if neighbor_hop_count > 1, else direct
+                if neighbor_match.get('neighbor_hop_count', 1) > 1:
+                    next_hop_gui = neighbor_match.get('next_hop')
+                    if next_hop_gui:
+                        next_hop_entry = self.neighbors_table.get(next_hop_gui)
+                        if next_hop_entry:
+                            pck['next_hop'] = next_hop_entry.get('addr', dest)
+                            path_str = "MESH"
+                        else:
+                            pck['next_hop'] = dest
+                            path_str = "MESH"
                     else:
                         pck['next_hop'] = dest
                         path_str = "MESH"
-                else:
+                else:  # Direct 1-hop neighbor
                     pck['next_hop'] = dest
-                    path_str = "MESH"
-            else:  # Direct 1-hop neighbor
-                pck['next_hop'] = dest
-                path_str = "DIRECT"
-            
-            # CRITICAL: Don't send to ourselves (prevents infinite loop)
-            if not addr_equals(pck.get('next_hop'), self.addr):
-                self._record_route(pck, path_str, pck['next_hop'])
-                self.send(pck)
-            return
-
-        # STEP 4: TREE ROUTING - Check if destination is in members_table (cluster member)
-        if self.role in (Roles.CLUSTER_HEAD, Roles.ROOT):
-            member_match = next(
-                (entry for entry in self.members_table if entry == dest),
-                None
-            )
-            if member_match:
-                pck['next_hop'] = dest
-                path_str = "CLUSTER_MEMBER"
-                self._record_route(pck, path_str, dest)
-                self.send(pck)
+                    path_str = "DIRECT"
+                
+                # CRITICAL: Don't send to ourselves (prevents infinite loop)
+                if not addr_equals(pck.get('next_hop'), self.addr):
+                    self._record_route(pck, path_str, pck['next_hop'])
+                    self.send(pck)
                 return
+        else:
+            # Mesh routing disabled - skip mesh steps
+            if config.ENABLE_ROUTING_DEBUG:
+                self.debug_log(True, f"[ROUTING] Node {self.id}: Mesh routing disabled, using tree routing only")
 
-        # STEP 5: TREE ROUTING - Check if destination is in same cluster (route to parent)
-        if self.ch_addr is not None and hasattr(dest, 'net_addr'):
-            if dest.net_addr == self.ch_addr.net_addr:
-                pck['next_hop'] = dest
-                path_str = "TREE_SAME_CLUSTER"
-                self._record_route(pck, path_str, dest)
-                self.send(pck)
-                return
+        # TREE ROUTING (Steps 4-7) - Only if enabled
+        if config.ENABLE_TREE_ROUTING:
+            # STEP 4: TREE ROUTING - Check if destination is in members_table (cluster member)
+            if self.role in (Roles.CLUSTER_HEAD, Roles.ROOT):
+                member_match = next(
+                    (entry for entry in self.members_table if entry == dest),
+                    None
+                )
+                if member_match:
+                    pck['next_hop'] = dest
+                    path_str = "CLUSTER_MEMBER"
+                    self._record_route(pck, path_str, dest)
+                    self.send(pck)
+                    return
 
-        # STEP 6: TREE ROUTING - Check child_networks_table (route to child)
-        if self.ch_addr is not None:
-            for child_gui, child_networks in self.child_networks_table.items():
-                if hasattr(dest, 'net_addr') and dest.net_addr in child_networks:
-                    child_info = self.neighbors_table.get(child_gui)
-                    if child_info:
-                        pck['next_hop'] = child_info.get('addr')
-                        path_str = "TREE_CHILD"
-                        self._record_route(pck, path_str, pck['next_hop'])
-                        self.send(pck)
-                        return
+            # STEP 5: TREE ROUTING - Check if destination is in same cluster (route to parent)
+            if self.ch_addr is not None and hasattr(dest, 'net_addr'):
+                if dest.net_addr == self.ch_addr.net_addr:
+                    pck['next_hop'] = dest
+                    path_str = "TREE_SAME_CLUSTER"
+                    self._record_route(pck, path_str, dest)
+                    self.send(pck)
+                    return
 
-        # STEP 7: TREE ROUTING - Send up tree to parent (fallback)
-        if self.role != Roles.ROOT and self.parent_gui is not None:
-            parent_info = self.neighbors_table.get(self.parent_gui)
-            if parent_info:
-                pck['next_hop'] = parent_info.get('ch_addr') or parent_info.get('addr')
-                path_str = "TREE_PARENT"
-                self._record_route(pck, path_str, pck['next_hop'])
-                self.send(pck)
-                return
+            # STEP 6: TREE ROUTING - Check child_networks_table (route to child)
+            if self.ch_addr is not None:
+                for child_gui, child_networks in self.child_networks_table.items():
+                    if hasattr(dest, 'net_addr') and dest.net_addr in child_networks:
+                        child_info = self.neighbors_table.get(child_gui)
+                        if child_info:
+                            pck['next_hop'] = child_info.get('addr')
+                            path_str = "TREE_CHILD"
+                            self._record_route(pck, path_str, pck['next_hop'])
+                            self.send(pck)
+                            return
+
+            # STEP 7: TREE ROUTING - Send up tree to parent (fallback)
+            if self.role != Roles.ROOT and self.parent_gui is not None:
+                parent_info = self.neighbors_table.get(self.parent_gui)
+                if parent_info:
+                    pck['next_hop'] = parent_info.get('ch_addr') or parent_info.get('addr')
+                    path_str = "TREE_PARENT"
+                    self._record_route(pck, path_str, pck['next_hop'])
+                    self.send(pck)
+                    return
+        else:
+            # Tree routing disabled - log warning
+            if config.ENABLE_ROUTING_DEBUG:
+                self.debug_log(True, f"[ROUTING] Node {self.id}: Tree routing disabled, no route available")
 
         # No route found
         self.debug_log(config.ENABLE_ROUTING_DEBUG, 
