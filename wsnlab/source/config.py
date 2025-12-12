@@ -24,14 +24,15 @@ NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER
 
 ## simulation properties
 SIM_NODE_COUNT = 100  # node count in simulation
-SIM_NODE_PLACING_CELL_SIZE = 75  # tighter placement -> better connectivity
+SIM_NODE_PLACING_CELL_SIZE = 95  # increased spacing to reduce overlap (was 75)
 SIM_DURATION = 5000  # simulation Duration in seconds
 SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
 SIM_VISUALIZATION = True  # visualization active
-SCALE = 0.9  # scale factor for visualization
-SIM_SEED = 45  # Random seed for reproducible simulations
+SCALE = 0.8  # scale factor for visualization
+SIM_SEED = 50 # Random seed for reproducible simulations
+SIM_BACKGROUND_COLOR = 'white'  # Background color for simulation window: 'white', 'lightgray', '#F0F0F0', etc.
 
 
 ## application properties
@@ -50,7 +51,7 @@ ENABLE_NEIGHBOR_DEBUG = True  # Toggle for neighbor discovery debug logs
 ENABLE_LOG_FILE = True  # Write simulation events to a timestamped log
 ENABLE_ROUTING_DEBUG = True  # Mesh/tree routing debug statements
 ENABLE_CLUSTER_DEBUG = True  # Cluster/member table debug statements
-ENABLE_MESH_ROUTING = True  # Enable mesh routing (try mesh first, then tree)
+ENABLE_MESH_ROUTING = True   # Enable mesh routing (try mesh first, then tree)
 ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh fails)
 # Note: If ENABLE_MESH_ROUTING = False, only tree routing will be used
 #       If ENABLE_TREE_ROUTING = False, only mesh routing will be used (may fail if no mesh route)
@@ -66,12 +67,30 @@ ENABLE_PACKET_LOSS_DEBUG = True
 
 ## network recovery properties
 ENABLE_NODE_FAILURE_RECOVERY = True  # Enable random node failures for testing recovery
-NODE_FAILURE_START_TIME = 200  # When to start introducing failures (simulation time)
+NODE_FAILURE_START_TIME = 200  # T1: When to start introducing failures (simulation time)
 NODE_FAILURE_INTERVAL = 100  # Time between random node failures
-NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers
-NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers
+NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers (T2-T3 period)
+NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers (T3)
 NUM_NODES_TO_FAIL = 2  # Number of random nodes to fail during simulation
 ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
+
+## visual highlight properties (for easy snapshot comparison)
+FAILURE_HIGHLIGHT_DURATION = 10  # How long to keep failed nodes RED (seconds) - makes T1 snapshots obvious
+ORPHAN_HIGHLIGHT_DURATION = 10  # How long to keep orphaned nodes ORANGE (seconds) - makes T1-T2 snapshots obvious
+
+## network snapshot properties (for recovery algorithm testing - class notes methodology)
+ENABLE_NETWORK_SNAPSHOTS = True  # Enable network state snapshots (CSV + PNG)
+SNAPSHOT_FOLDER = "snapshots"  # Folder name to store all snapshot PNG files
+CAPTURE_SIMULATION_WINDOW = True  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
+SNAPSHOT_BEFORE_T1 = True  # Take snapshot before T1 (baseline network state)
+SNAPSHOT_AT_T1 = True  # Take snapshot at T1 (when failures occur)
+SNAPSHOT_T1_T2_AFTER_FAILURE = True  # Take snapshot between T1-T2 (after failure, show orphans)
+SNAPSHOT_T1_T2_DELAY = 5  # Delay after T1 to take T1-T2 snapshot (seconds)
+SNAPSHOT_T2_T3_RECOVERY = True  # Take snapshot during T2-T3 (recovery in progress)
+SNAPSHOT_AT_T3_AFTER_RECOVERY = True  # Take snapshot at T3 (after recovery)
+SNAPSHOT_AFTER_T3_INTERVAL = 50  # Interval for snapshots after T3 (seconds)
+SNAPSHOT_AFTER_T3_COUNT = 3  # Number of snapshots to take after T3
+SNAPSHOT_FINAL_STATE = True  # Take final snapshot at simulation end
 
 ## router / CH transfer properties (for overlap reduction)
 ENABLE_CH_TRANSFER = True  # Enable CH role transfer to reduce cluster overlap
