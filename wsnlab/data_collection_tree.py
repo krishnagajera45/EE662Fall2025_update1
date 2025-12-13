@@ -1,26 +1,37 @@
 import random
 from enum import Enum
 import sys
-sys.path.insert(1, '.')
-from source import wsnlab_vis as wsn
 import math
-from source import config
-from collections import Counter
-from datetime import datetime
-import csv  # <— add this near your other imports
+import csv
 import json
 import os
-# Visualization functions are now in wsnlab_vis.py
-# They will be imported when needed
+import shutil
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
 
-# #region agent log
-DEBUG_LOG_PATH = "/Users/krishnagajera/Project/Sem 3/wsn/EE662Fall2025_update1/.cursor/debug.log"
+sys.path.insert(1, '.')
+from source import wsnlab_vis as wsn
+from source import config
+
+# Debug logging
+DEBUG_LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".cursor", "debug.log")
+
 def debug_log(location, message, data, hypothesis_id):
+    """Log debug information to file."""
     try:
+        os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
         with open(DEBUG_LOG_PATH, "a") as f:
-            f.write(json.dumps({"location": location, "message": message, "data": data, "timestamp": datetime.now().timestamp(), "sessionId": "debug-session", "hypothesisId": hypothesis_id}) + "\n")
-    except: pass
-# #endregion
+            f.write(json.dumps({
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": datetime.now().timestamp(),
+                "sessionId": "debug-session",
+                "hypothesisId": hypothesis_id
+            }) + "\n")
+    except Exception:
+        pass
 
 # Track where each node is placed
 NODE_POS = {}  # {node_id: (x, y)}
@@ -48,6 +59,8 @@ RECOVERY_LOG_FILE = "recovery_events.csv"
 ORPHAN_LOG_FILE = "orphan_events.csv"
 ROLE_CHANGE_LOG_FILE = "role_changes.csv"
 SNAPSHOT_LOG_FILE = "network_snapshots.csv"  # Network state snapshots
+POWER_LOG_FILE = "node_power_levels_over_time.csv"  # Power levels over time
+POWER_LOG_HEADER_WRITTEN = False  # Track if CSV header has been written
 FAILED_NODES = set()  # Set of currently failed node IDs
 ORPHANED_NODES = set()  # Set of currently orphaned node IDs
 RECOVERY_EVENTS = []  # List of recovery events
@@ -87,9 +100,28 @@ def next_packet_id():
     DATA_PACKET_COUNTER += 1
     return DATA_PACKET_COUNTER
 
+def log_power_level(node_id, time, power):
+    """Log node power level to CSV file.
+    
+    Args:
+        node_id (int): Node ID
+        time (float): Simulation time
+        power (float): Current power/energy remaining (Joules)
+    """
+    global POWER_LOG_HEADER_WRITTEN
+    try:
+        with open(POWER_LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not POWER_LOG_HEADER_WRITTEN:
+                writer.writerow(["time", "node_id", "power"])
+                POWER_LOG_HEADER_WRITTEN = True
+            writer.writerow([time, node_id, power])
+    except Exception:
+        pass  # Silently fail if file can't be written
+
 def init_log_file():
     """Create timestamped log file if enabled."""
-    global LOG_FILE, LOG_FILE_NAME, PACKET_ROUTE_HEADER_WRITTEN
+    global LOG_FILE, LOG_FILE_NAME, PACKET_ROUTE_HEADER_WRITTEN, POWER_LOG_HEADER_WRITTEN
     if not config.ENABLE_LOG_FILE or LOG_FILE is not None:
         return None
     timestamp = datetime.now().strftime("%d-%m-%y-%H%M")
@@ -99,7 +131,8 @@ def init_log_file():
     print(f"Logging to {LOG_FILE_NAME}")
     LOG_FILE.write(f"Logging to {LOG_FILE_NAME}\n")
     LOG_FILE.flush()
-    # reset packet route file each run
+    
+    # Reset packet route file each run
     with open(PACKET_ROUTE_FILE, "w", newline="") as f:
         pass
     with open(PACKET_DELAY_FILE, "w", newline="") as f:
@@ -114,6 +147,7 @@ def init_log_file():
         writer = csv.writer(f)
         writer.writerow(["packet_id", "packet_type", "source_gui", "dest_gui",
                          "path", "hop_count", "started_at", "delivered_at", "delay"])
+    
     # Initialize recovery tracking files
     with open(RECOVERY_LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
@@ -125,6 +159,7 @@ def init_log_file():
     with open(ROLE_CHANGE_LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["node_id", "old_role", "new_role", "time", "reason"])
+    
     # Initialize snapshot log file
     with open(SNAPSHOT_LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
@@ -156,6 +191,100 @@ def write_log(node_ref, message, sim_time=None):
         LOG_FILE.write(f"[{sim_time:10.5f}] {tag} {message}\n")
     except Exception:
         pass
+
+def copy_simulation_outputs():
+    """Copy all simulation outputs (CSV, logs, snapshots) to a results folder.
+    
+    Creates a folder named based on simulation configuration:
+    - results_CT_PL{packet_loss}_N{node_count} for Tree routing
+    - results_MT_PL{packet_loss}_N{node_count} for Mesh+Tree routing
+    """
+    try:
+        # Determine routing strategy
+        routing_strategy = "MT" if config.ENABLE_MESH_ROUTING else "CT"
+        
+        # Get configuration parameters
+        packet_loss = getattr(config, 'PACKET_LOSS_RATE', 0)
+        node_count = getattr(config, 'SIM_NODE_COUNT', 100)
+        mesh_hop = getattr(config, 'MESH_HOP_N', getattr(config, 'MAX_HOP_DISTANCE', 1)) if config.ENABLE_MESH_ROUTING else 0
+        
+        # Create folder name
+        folder_name = f"results_{routing_strategy}_PL{packet_loss}_N{node_count}"
+        if config.ENABLE_MESH_ROUTING:
+            folder_name += f"_H{mesh_hop}"
+        
+        # Create results folder
+        results_dir = Path(folder_name)
+        results_dir.mkdir(exist_ok=True)
+        
+        # Files to copy
+        files_to_copy = [
+            # CSV files
+            "registration_log.csv",
+            "packet_log.csv",
+            "packet_delays.csv",
+            "packet_paths.csv",
+            "packet_routes.csv",
+            "node_power_levels.csv",
+            "node_power_levels_over_time.csv",
+            "topology.csv",
+            "recovery_time.csv",
+            "recovery_events.csv",
+            "orphan_events.csv",
+            "role_changes.csv",
+            "network_snapshots.csv",
+            "clusterhead_distances.csv",
+            "neighbor_distances.csv",
+            "multihop_neighbor_table.csv",
+            "node_distances.csv",
+            "node_distance_matrix.csv",
+            # Log files
+            LOG_FILE_NAME if LOG_FILE_NAME else None,
+            # Config file
+            "wsnlab/source/config.py",
+        ]
+        
+        # Copy CSV and log files
+        copied_count = 0
+        for file_path in files_to_copy:
+            if file_path is None:
+                continue
+            src = Path(file_path)
+            if src.exists():
+                dst = results_dir / src.name
+                shutil.copy2(src, dst)
+                copied_count += 1
+        
+        # Copy snapshot folder if it exists
+        snapshot_folder = Path(getattr(config, 'SNAPSHOT_FOLDER', 'snapshots'))
+        if snapshot_folder.exists() and snapshot_folder.is_dir():
+            dst_snapshot = results_dir / snapshot_folder.name
+            if dst_snapshot.exists():
+                shutil.rmtree(dst_snapshot)
+            shutil.copytree(snapshot_folder, dst_snapshot)
+            copied_count += 1
+        
+        # Create a metadata file with simulation configuration
+        metadata = {
+            "routing_strategy": routing_strategy,
+            "packet_loss_rate": packet_loss,
+            "node_count": node_count,
+            "mesh_enabled": config.ENABLE_MESH_ROUTING,
+            "tree_enabled": config.ENABLE_TREE_ROUTING,
+            "mesh_hop_n": mesh_hop if config.ENABLE_MESH_ROUTING else None,
+            "num_nodes_to_fail": getattr(config, 'NUM_NODES_TO_FAIL', 0),
+            "simulation_duration": getattr(config, 'SIM_DURATION', 5000),
+            "timestamp": datetime.now().isoformat(),
+        }
+        
+        metadata_file = results_dir / "simulation_metadata.json"
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        log_to_console_and_file(f"📁 Copied {copied_count} files to {folder_name}/")
+        
+    except Exception as e:
+        log_to_console_and_file(f"⚠️  Error copying simulation outputs: {e}")
 
 def close_log_file():
     global LOG_FILE
@@ -404,9 +533,7 @@ def take_network_snapshot(snapshot_label="", sim_time=None):
         
         log_to_console_and_file(f"📸 Taking network snapshot: {snapshot_label} at time {sim_time:.2f}s")
         
-        # #region agent log
         debug_log(f"data_collection_tree.py:{394}", "Snapshot start", {"snapshot_label": snapshot_label, "sim_time": sim_time, "FAILED_NODES": list(FAILED_NODES), "ORPHANED_NODES": list(ORPHANED_NODES)}, "D")
-        # #endregion
         
         # Count statistics
         role_counts = Counter()
@@ -434,10 +561,8 @@ def take_network_snapshot(snapshot_label="", sim_time=None):
                 if is_failed:
                     failed_count += 1
                 
-                # #region agent log
                 if snapshot_label == "At_T1_Failure" and (is_failed or is_failed_in_set):
                     debug_log(f"data_collection_tree.py:{417}", "Node in snapshot - failed status", {"node_id": node_id, "is_failed_attr": is_failed, "is_failed_in_set": is_failed_in_set, "snapshot_label": snapshot_label}, "D")
-                # #endregion
                 
                 is_orphan = node_id in ORPHANED_NODES
                 if is_orphan:
@@ -1067,13 +1192,19 @@ class SensorNode(wsn.Node):
             elif new_role == Roles.REGISTERED:
                 self.scene.nodecolor(self.id, 0, 1, 0)
             elif new_role == Roles.CLUSTER_HEAD:
-                self.scene.nodecolor(self.id, 0, 0, 1)
+                self.scene.nodecolor(self.id, 0, 0, 1)  # Blue for cluster head
                 self.draw_tx_range()
+                # Start power logging for CLUSTER_HEAD
+                if config.ENABLE_ENERGY_MODEL:
+                    self.set_timer('TIMER_POWER_LOG', 100.0)
             elif new_role == Roles.ROOT:
                 self.scene.nodecolor(self.id, 0, 0, 0)
                 self.draw_tx_range()  # ROOT should also draw its TX range
                 self.set_timer('TIMER_EXPORT_CH_CSV', config.EXPORT_CH_CSV_INTERVAL)
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
+                # Start power logging for ROOT
+                if config.ENABLE_ENERGY_MODEL:
+                    self.set_timer('TIMER_POWER_LOG', 100.0)
             elif new_role == Roles.ROUTER:
                 # Magenta/pink color to distinguish from CH (blue)
                 self.scene.nodecolor(self.id, 1, 0, 0.75)
@@ -1082,8 +1213,11 @@ class SensorNode(wsn.Node):
                     try:
                         self.scene.delshape(self.tx_range_circle_id)
                         self.tx_range_circle_id = None
-                    except:
+                    except Exception:
                         pass
+                # Start power logging for ROUTER
+                if config.ENABLE_ENERGY_MODEL:
+                    self.set_timer('TIMER_POWER_LOG', 100.0)
 
     ##################
 # Router and CH Transfer Methods (for overlap reduction)
@@ -1340,21 +1474,15 @@ class SensorNode(wsn.Node):
     ###################
     def fail_node(self):
         """Simulate node failure - node stops all operations."""
-        # #region agent log
         debug_log(f"data_collection_tree.py:{1320}", "fail_node() entry", {"node_id": self.id, "current_role": _role_name(self.role), "is_failed": self.is_failed, "is_root": self.role == Roles.ROOT}, "B")
-        # #endregion
         
         if self.is_failed or self.role == Roles.ROOT:
-            # #region agent log
             debug_log(f"data_collection_tree.py:{1323}", "fail_node() early return - already failed or ROOT", {"node_id": self.id, "is_failed": self.is_failed, "is_root": self.role == Roles.ROOT}, "B")
-            # #endregion
             return  # Cannot fail ROOT or already failed node
         
         # Only fail nodes that have joined the network (REGISTERED or CLUSTER_HEAD)
         if self.role not in [Roles.REGISTERED, Roles.CLUSTER_HEAD]:
-            # #region agent log
             debug_log(f"data_collection_tree.py:{1326}", "fail_node() early return - wrong role", {"node_id": self.id, "role": _role_name(self.role), "required_roles": ["REGISTERED", "CLUSTER_HEAD"]}, "B")
-            # #endregion
             # Always log skipped failures (not just in debug mode) for troubleshooting
             log_to_console_and_file(f"[FAILURE_SKIPPED] Node {self.id}: Failure skipped at {self.sim.now:.2f}s - not yet registered (role: {_role_name(self.role)})")
             if config.ENABLE_RECOVERY_DEBUG:
@@ -1369,9 +1497,7 @@ class SensorNode(wsn.Node):
         # Track as failed
         FAILED_NODES.add(self.id)
         
-        # #region agent log
         debug_log(f"data_collection_tree.py:{1339}", "Node marked as failed", {"node_id": self.id, "failure_time": self.failure_time, "FAILED_NODES": list(FAILED_NODES)}, "C")
-        # #endregion
         
         # Mark children as orphans
         orphan_count = 0
@@ -2075,9 +2201,7 @@ class SensorNode(wsn.Node):
         """Routing and forwarding given package.
         Mesh-first routing in local neighborhood, reverts to tree when mesh fails.
         """
-        # #region agent log
         debug_log(f"data_collection_tree.py:{2074}", "route_and_forward_package entry", {"node_id": self.id, "packet_type": pck.get('type'), "dest": format_addr(pck.get('dest')), "mesh_enabled": config.ENABLE_MESH_ROUTING, "tree_enabled": config.ENABLE_TREE_ROUTING, "route_trace": pck.get('route_trace', [])}, "A")
-        # #endregion
         
         if 'created_at' not in pck:
             pck['created_at'] = self.now
@@ -2198,30 +2322,22 @@ class SensorNode(wsn.Node):
                 return
         else:
             # Mesh routing disabled - skip mesh steps
-            # #region agent log
             debug_log(f"data_collection_tree.py:{2195}", "Mesh routing disabled, skipping to tree routing", {"node_id": self.id, "packet_type": pck.get('type'), "dest": format_addr(dest)}, "B")
-            # #endregion
             if config.ENABLE_ROUTING_DEBUG:
                 self.debug_log(True, f"[ROUTING] Node {self.id}: Mesh routing disabled, using tree routing only")
 
         # TREE ROUTING (Steps 4-7) - Only if enabled
         if config.ENABLE_TREE_ROUTING:
-            # #region agent log
             debug_log(f"data_collection_tree.py:{2201}", "Tree routing check start", {"node_id": self.id, "role": _role_name(self.role), "has_parent": self.parent_gui is not None, "parent_gui": self.parent_gui, "ch_addr": format_addr(self.ch_addr), "members_count": len(self.members_table), "child_networks_count": len(self.child_networks_table)}, "C")
-            # #endregion
             # STEP 4: TREE ROUTING - Check if destination is in members_table (cluster member)
             if self.role in (Roles.CLUSTER_HEAD, Roles.ROOT):
-                # #region agent log
                 debug_log(f"data_collection_tree.py:{2203}", "Tree STEP 4: Checking members_table", {"node_id": self.id, "members_table": [format_addr(m) for m in self.members_table], "dest": format_addr(dest)}, "D")
-                # #endregion
                 member_match = next(
                     (entry for entry in self.members_table if entry == dest),
                     None
                 )
                 if member_match:
-                    # #region agent log
                     debug_log(f"data_collection_tree.py:{2208}", "Tree STEP 4: MATCH - routing to cluster member", {"node_id": self.id, "next_hop": format_addr(dest), "path": "CLUSTER_MEMBER"}, "D")
-                    # #endregion
                     pck['next_hop'] = dest
                     path_str = "CLUSTER_MEMBER"
                     self._record_route(pck, path_str, dest)
@@ -2230,13 +2346,9 @@ class SensorNode(wsn.Node):
 
             # STEP 5: TREE ROUTING - Check if destination is in same cluster (route to parent)
             if self.ch_addr is not None and hasattr(dest, 'net_addr'):
-                # #region agent log
                 debug_log(f"data_collection_tree.py:{2215}", "Tree STEP 5: Checking same cluster", {"node_id": self.id, "my_cluster": self.ch_addr.net_addr if self.ch_addr else None, "dest_cluster": dest.net_addr if hasattr(dest, 'net_addr') else None}, "E")
-                # #endregion
                 if dest.net_addr == self.ch_addr.net_addr:
-                    # #region agent log
                     debug_log(f"data_collection_tree.py:{2217}", "Tree STEP 5: MATCH - same cluster, routing directly", {"node_id": self.id, "next_hop": format_addr(dest), "path": "TREE_SAME_CLUSTER"}, "E")
-                    # #endregion
                     pck['next_hop'] = dest
                     path_str = "TREE_SAME_CLUSTER"
                     self._record_route(pck, path_str, dest)
@@ -2245,16 +2357,12 @@ class SensorNode(wsn.Node):
 
             # STEP 6: TREE ROUTING - Check child_networks_table (route to child)
             if self.ch_addr is not None:
-                # #region agent log
                 debug_log(f"data_collection_tree.py:{2224}", "Tree STEP 6: Checking child_networks_table", {"node_id": self.id, "child_networks": {gui: list(nets) for gui, nets in self.child_networks_table.items()}, "dest_cluster": dest.net_addr if hasattr(dest, 'net_addr') else None}, "F")
-                # #endregion
                 for child_gui, child_networks in self.child_networks_table.items():
                     if hasattr(dest, 'net_addr') and dest.net_addr in child_networks:
                         child_info = self.neighbors_table.get(child_gui)
                         if child_info:
-                            # #region agent log
                             debug_log(f"data_collection_tree.py:{2228}", "Tree STEP 6: MATCH - routing to child", {"node_id": self.id, "child_gui": child_gui, "next_hop": format_addr(child_info.get('addr')), "path": "TREE_CHILD"}, "F")
-                            # #endregion
                             pck['next_hop'] = child_info.get('addr')
                             path_str = "TREE_CHILD"
                             self._record_route(pck, path_str, pck['next_hop'])
@@ -2263,32 +2371,24 @@ class SensorNode(wsn.Node):
 
             # STEP 7: TREE ROUTING - Send up tree to parent (fallback)
             if self.role != Roles.ROOT and self.parent_gui is not None:
-                # #region agent log
                 debug_log(f"data_collection_tree.py:{2236}", "Tree STEP 7: Routing to parent (fallback)", {"node_id": self.id, "parent_gui": self.parent_gui, "role": _role_name(self.role)}, "G")
-                # #endregion
                 parent_info = self.neighbors_table.get(self.parent_gui)
                 if parent_info:
-                    # #region agent log
                     debug_log(f"data_collection_tree.py:{2239}", "Tree STEP 7: MATCH - routing to parent", {"node_id": self.id, "parent_gui": self.parent_gui, "next_hop": format_addr(parent_info.get('ch_addr') or parent_info.get('addr')), "path": "TREE_PARENT"}, "G")
-                    # #endregion
                     pck['next_hop'] = parent_info.get('ch_addr') or parent_info.get('addr')
                     path_str = "TREE_PARENT"
                     self._record_route(pck, path_str, pck['next_hop'])
                     self.send(pck)
                     return
                 else:
-                    # #region agent log
                     debug_log(f"data_collection_tree.py:{2244}", "Tree STEP 7: FAILED - parent_info not found", {"node_id": self.id, "parent_gui": self.parent_gui}, "G")
-                    # #endregion
         else:
             # Tree routing disabled - log warning
             if config.ENABLE_ROUTING_DEBUG:
                 self.debug_log(True, f"[ROUTING] Node {self.id}: Tree routing disabled, no route available")
 
         # No route found
-        # #region agent log
         debug_log(f"data_collection_tree.py:{2250}", "NO_ROUTE found", {"node_id": self.id, "packet_type": pck.get('type'), "dest": format_addr(dest), "role": _role_name(self.role), "has_parent": self.parent_gui is not None, "is_root": self.role == Roles.ROOT}, "H")
-        # #endregion
         self.debug_log(config.ENABLE_ROUTING_DEBUG, 
                       f"[ROUTING] Node {self.id}: NO_ROUTE for type={pck.get('type')} dest={format_addr(dest)}")
         write_log(self, f"ROUTE_FAIL type={pck.get('type')} dest={format_addr(dest)}")
@@ -3115,10 +3215,8 @@ class SensorNode(wsn.Node):
                     # Start baseline energy consumption timer
                     if config.ENABLE_ENERGY_MODEL:
                         self.set_timer('TIMER_BASELINE_ENERGY', 1.0)  # Check every second
-                    # # sensor implementation
-                    # timer_duration =  self.id % 20
-                    # if timer_duration == 0: timer_duration = 1
-                    # self.set_timer('TIMER_SENSOR', timer_duration)
+                        # Start power logging timer (log every 100 seconds)
+                        self.set_timer('TIMER_POWER_LOG', 100.0)
             if pck['type'] == 'CH_TRANSFER':  # REGISTERED node can also receive CH transfer
                 # Accept the CH role transfer
                 if self.id != ROOT_ID and self.role == Roles.REGISTERED:
@@ -3418,19 +3516,21 @@ class SensorNode(wsn.Node):
             if self.role == Roles.ROOT:
                 write_neighbor_distances_csv("neighbor_distances.csv")
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
+        elif name == 'TIMER_POWER_LOG':
+            # Log current power level to CSV
+            if config.ENABLE_ENERGY_MODEL and hasattr(self, 'energy_remaining'):
+                log_power_level(self.id, self.now, self.energy_remaining)
+                # Reschedule for next interval (100 seconds)
+                self.set_timer('TIMER_POWER_LOG', 100.0)
 
         elif name.startswith('TIMER_NODE_FAILURE_'):
-            # #region agent log
             debug_log(f"data_collection_tree.py:{3346}", "TIMER_NODE_FAILURE fired", {"node_id": self.id, "sim_time": self.sim.now, "timer_name": name}, "A")
-            # #endregion
             # Node failure event (T1)
             # Log node state before attempting failure
             current_role = _role_name(self.role)
             log_to_console_and_file(f"[FAILURE_CHECK] Node {self.id}: Timer fired at {self.sim.now:.2f}s, current role: {current_role}")
             
-            # #region agent log
             debug_log(f"data_collection_tree.py:{3353}", "Before fail_node() call", {"node_id": self.id, "role": current_role, "is_failed_before": self.is_failed, "FAILED_NODES_before": list(FAILED_NODES)}, "B")
-            # #endregion
             
             # Check if node is ready to fail (must be REGISTERED or CLUSTER_HEAD)
             # If not ready, reschedule failure for later (with retry limit)
@@ -3450,9 +3550,7 @@ class SensorNode(wsn.Node):
             was_failed_before = self.is_failed
             self.fail_node()
             
-            # #region agent log
             debug_log(f"data_collection_tree.py:{3356}", "After fail_node() call", {"node_id": self.id, "is_failed_after": self.is_failed, "was_failed_before": was_failed_before, "FAILED_NODES_after": list(FAILED_NODES)}, "C")
-            # #endregion
             
             # Log if failure was successful or skipped
             if was_failed_before == self.is_failed and not self.is_failed:
@@ -3462,9 +3560,7 @@ class SensorNode(wsn.Node):
             elif self.is_failed:
                 log_to_console_and_file(f"[FAILURE_SUCCESS] Node {self.id}: Successfully failed at {self.sim.now:.2f}s")
             
-            # #region agent log
             debug_log(f"data_collection_tree.py:{3363}", "Before snapshot at T1", {"node_id": self.id, "FAILED_NODES": list(FAILED_NODES), "snapshot_enabled": config.ENABLE_NETWORK_SNAPSHOTS and config.SNAPSHOT_AT_T1}, "E")
-            # #endregion
             
             # Take snapshot at T1 ONLY if failure actually occurred (so failed nodes show in red)
             if config.ENABLE_NETWORK_SNAPSHOTS and config.SNAPSHOT_AT_T1 and self.is_failed:
@@ -3752,5 +3848,9 @@ calculate_and_log_average_packet_delay()
 if config.ENABLE_NODE_FAILURE_RECOVERY:
     calculate_and_log_recovery_statistics()
 log_packet_loss_statistics()
+
+# Copy all simulation outputs to results folder
+copy_simulation_outputs()
+
 # Close log file AFTER all statistics are written
 close_log_file()

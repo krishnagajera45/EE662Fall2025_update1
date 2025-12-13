@@ -207,6 +207,8 @@ class Simulator(wsnlab.Simulator):
                 bg_color = getattr(config, 'SIM_BACKGROUND_COLOR', 'lightgray')
                 # Use after_idle to set background once window is fully initialized
                 self.tk.after_idle(lambda: self._set_canvas_background(bg_color))
+                # Set time text color based on background (black for white, white for dark)
+                self.tk.after_idle(lambda: self._set_time_text_color(bg_color))
             except Exception:
                 pass  # If config not available, use default
         else:
@@ -247,6 +249,33 @@ class Simulator(wsnlab.Simulator):
                 root.config(bg=bg_color)
         except Exception as e:
             # Silently fail if we can't set background color
+            pass
+
+    def _set_time_text_color(self, bg_color):
+        """Set the time text color based on background color for visibility.
+        
+        Args:
+            bg_color (str): Background color (e.g., 'white', 'lightgray', '#FFFFFF')
+        """
+        try:
+            # Determine text color based on background
+            bg_lower = bg_color.lower()
+            if bg_lower in ['white', '#ffffff', '#fff', 'w']:
+                text_color = 'black'
+            elif bg_lower in ['lightgray', 'light grey', '#d3d3d3', '#f0f0f0']:
+                text_color = 'black'
+            else:
+                # For dark backgrounds, use white text
+                text_color = 'white'
+            
+            # Set time text color if plotter has timeText
+            if hasattr(self.tkplot, 'timeText') and hasattr(self.tkplot, 'canvas'):
+                try:
+                    self.tkplot.canvas.itemconfigure(self.tkplot.timeText, fill=text_color)
+                except Exception:
+                    pass
+        except Exception as e:
+            # Silently fail if we can't set text color
             pass
 
     def _update_time(self):

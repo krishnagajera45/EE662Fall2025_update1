@@ -36,7 +36,8 @@ class Plotter(GenericPlotter):
         self.tk.title(self.windowTitle)
         self.canvas = Canvas(self.tk, width=tx, height=ty)
         self.canvas.pack(fill=BOTH, expand=YES)
-        self.timeText = self.canvas.create_text(0,0,text="time=0.0",anchor=NW)
+        # Create time text with black color by default (will be adjusted if background is white)
+        self.timeText = self.canvas.create_text(0,0,text="time=0.0",anchor=NW, fill='black')
 
     ###################
     def setTime(self, time):

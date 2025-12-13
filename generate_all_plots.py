@@ -1545,6 +1545,1684 @@ def plot_packet_size_vs_network_lifetime():
 
 
 # ============================================================================
+# CT vs MT COMPARISON PLOTS
+# ============================================================================
+
+def load_results_from_folder(folder_path):
+    """Load simulation results from a results folder.
+    
+    Args:
+        folder_path (Path): Path to results folder
+        
+    Returns:
+        dict: Dictionary with loaded data from CSV files
+    """
+    results = {}
+    folder = Path(folder_path)
+    
+    if not folder.exists():
+        return results
+    
+    # Load registration log
+    reg_file = folder / "registration_log.csv"
+    if reg_file.exists():
+        results['registration'] = []
+        with open(reg_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    # Handle both 'join_delay' and 'delta_time' column names
+                    delay = float(row.get('join_delay', row.get('delta_time', 0)))
+                    results['registration'].append({
+                        'node_id': int(row.get('node_id', 0)),
+                        'start_time': float(row.get('start_time', 0)),
+                        'registered_time': float(row.get('registered_time', 0)),
+                        'delta_time': delay,
+                        'join_delay': delay
+                    })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load packet delays (packet_log.csv doesn't exist, use packet_delays.csv)
+    delay_file = folder / "packet_delays.csv"
+    if delay_file.exists():
+        results['packets'] = []
+        with open(delay_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    created_at = float(row.get('created_at', 0))
+                    delivered_at = float(row.get('delivered_at', 0))
+                    if delivered_at > 0:
+                        results['packets'].append({
+                            'packet_id': row.get('packet_type', '') + '_' + str(row.get('source_gui', '')),
+                            'source': int(row.get('source_gui', 0)),
+                            'created_at': created_at,
+                            'received_at': delivered_at,
+                            'delay': float(row.get('total_delay', delivered_at - created_at)),
+                            'packet_type': row.get('packet_type', '')
+                        })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load packet delays (already loaded above as 'packets', but keep for compatibility)
+    if 'packets' in results:
+        results['delays'] = [p.get('delay', 0) for p in results['packets']]
+    
+    # Load network snapshots for connectivity tracking
+    snapshot_file = folder / "network_snapshots.csv"
+    if snapshot_file.exists():
+        results['snapshots'] = defaultdict(list)
+        with open(snapshot_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    snapshot_time = float(row.get('snapshot_time', 0))
+                    results['snapshots'][snapshot_time].append({
+                        'node_id': int(row.get('node_id', 0)),
+                        'role': row.get('role', ''),
+                        'is_failed': row.get('is_failed', 'NO') == 'YES',
+                        'is_orphan': row.get('is_orphan', 'NO') == 'YES',
+                        'parent_gui': row.get('parent_gui', ''),
+                        'energy_remaining': float(row.get('energy_remaining', 0))
+                    })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load recovery events
+    recovery_file = folder / "recovery_events.csv"
+    if recovery_file.exists():
+        results['recoveries'] = []
+        with open(recovery_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    results['recoveries'].append({
+                        'node_id': int(row.get('node_id', 0)),
+                        'failure_time': float(row.get('failure_time', 0)),
+                        'recovery_time': float(row.get('recovery_time', 0)),
+                        'downtime': float(row.get('downtime', 0))
+                    })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load orphan events
+    orphan_file = folder / "orphan_events.csv"
+    if orphan_file.exists():
+        results['orphans'] = []
+        with open(orphan_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    results['orphans'].append({
+                        'node_id': int(row.get('node_id', 0)),
+                        'time': float(row.get('time', 0)),
+                        'reason': row.get('reason', '')
+                    })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load role changes
+    role_file = folder / "role_changes.csv"
+    if role_file.exists():
+        results['role_changes'] = []
+        with open(role_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    results['role_changes'].append({
+                        'node_id': int(row.get('node_id', 0)),
+                        'old_role': row.get('old_role', ''),
+                        'new_role': row.get('new_role', ''),
+                        'time': float(row.get('time', 0))
+                    })
+                except (ValueError, KeyError):
+                    pass
+    
+    # Load energy data - nodes log at different times, need to aggregate by time windows
+    energy_file = folder / "node_power_levels_over_time.csv"
+    if energy_file.exists():
+        # First pass: collect all energy readings by node
+        energy_by_node = defaultdict(list)  # {node_id: [(time, energy), ...]}
+        
+        with open(energy_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    time_val = float(row.get('time', 0))
+                    node_id = int(row.get('node_id', 0))
+                    power = float(row.get('power', 0))
+                    energy_by_node[node_id].append((time_val, power))
+                except (ValueError, KeyError):
+                    pass
+        
+        # Second pass: aggregate by time windows (100-second bins)
+        if energy_by_node:
+            all_nodes = sorted(energy_by_node.keys())
+            time_windows = sorted(set([int(t // 100) * 100 for node_data in energy_by_node.values() for t, _ in node_data]))
+            
+            results['energy'] = defaultdict(list)
+            results['energy_by_node'] = energy_by_node  # Keep for detailed analysis
+            
+            for time_window in time_windows:
+                energies = []
+                for node_id in all_nodes:
+                    node_history = energy_by_node[node_id]
+                    if node_history:
+                        # Get latest energy reading at or before this time window
+                        relevant = [(t, e) for t, e in node_history if t <= time_window + 50]
+                        if relevant:
+                            latest = max(relevant, key=lambda x: x[0])
+                            energies.append(latest[1])
+                        else:
+                            # No data yet, use first reading or 0
+                            first_reading = min(node_history, key=lambda x: x[0])
+                            energies.append(first_reading[1] if first_reading[0] <= time_window + 100 else 0)
+                    else:
+                        energies.append(0)
+                
+                if energies:
+                    results['energy'][time_window] = energies
+    
+    # Load metadata
+    meta_file = folder / "simulation_metadata.json"
+    if meta_file.exists():
+        with open(meta_file, 'r') as f:
+            results['metadata'] = json.load(f)
+    
+    return results
+
+
+def find_results_folders(base_dir="."):
+    """Find all results folders matching pattern results_*_PL*_N*.
+    
+    Returns:
+        list: List of (folder_path, metadata) tuples
+    """
+    folders = []
+    base = Path(base_dir)
+    
+    for folder in base.glob("results_*_PL*_N*"):
+        if folder.is_dir():
+            meta_file = folder / "simulation_metadata.json"
+            metadata = {}
+            if meta_file.exists():
+                with open(meta_file, 'r') as f:
+                    metadata = json.load(f)
+            folders.append((folder, metadata))
+    
+    return folders
+
+
+def plot_network_discovery_rate():
+    """Plot 1: Network Discovery/Registration Rate (CT vs MT)."""
+    print("  Generating network discovery rate plot (CT vs MT)...")
+    
+    # Find results folders
+    folders = find_results_folders()
+    if len(folders) < 2:
+        print("    Warning: Need at least 2 simulation runs (CT and MT) for comparison")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Group by routing strategy
+    ct_data = {}
+    mt_data = {}
+    
+    for folder_path, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'registration' not in results:
+            continue
+        
+        # Build cumulative registration over time
+        reg_times = sorted([r['registered_time'] for r in results['registration']])
+        time_bins = np.arange(0, max(reg_times) + 10, 10)  # 10-second bins
+        cumulative = []
+        current_count = 0
+        
+        for t in time_bins:
+            current_count = sum(1 for rt in reg_times if rt <= t)
+            cumulative.append(current_count)
+        
+        if strategy == 'CT':
+            ct_data[metadata.get('packet_loss_rate', 0)] = (time_bins, cumulative)
+        else:
+            mt_data[metadata.get('packet_loss_rate', 0)] = (time_bins, cumulative)
+    
+    # Plot CT
+    for pl_rate, (times, counts) in sorted(ct_data.items()):
+        label = f"CT (PL={pl_rate})"
+        ax.plot(times, counts, 'o-', linewidth=2, markersize=4, label=label, color='blue', alpha=0.7)
+    
+    # Plot MT
+    for pl_rate, (times, counts) in sorted(mt_data.items()):
+        label = f"MT (PL={pl_rate})"
+        ax.plot(times, counts, 's-', linewidth=2, markersize=4, label=label, color='red', alpha=0.7)
+    
+    ax.set_xlabel('Time (seconds)', fontsize=12)
+    ax.set_ylabel('Number of Discovered/Registered Nodes', fontsize=12)
+    ax.set_title('Network Discovery Rate: CT vs MT', fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("network_discovery_rate_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: network_discovery_rate_ct_vs_mt.png")
+
+
+def plot_packet_delivery_with_loss():
+    """Plot 2: Packet Delivery Performance with Packet Loss (CT vs MT)."""
+    print("  Generating packet delivery with packet loss plot (CT vs MT)...")
+    
+    folders = find_results_folders()
+    if len(folders) < 2:
+        print("    Warning: Need simulation runs with different packet loss rates")
+        return
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle('Packet Delivery Performance: CT vs MT (Different Packet Loss Rates)', 
+                 fontsize=16, fontweight='bold')
+    
+    packet_loss_rates = [0, 0.001, 0.01]
+    
+    for idx, pl_rate in enumerate(packet_loss_rates):
+        ax = axes[idx]
+        
+        ct_data = None
+        mt_data = None
+        
+        for folder, metadata in folders:
+            if abs(metadata.get('packet_loss_rate', 0) - pl_rate) > 0.0001:
+                continue
+            
+            strategy = metadata.get('routing_strategy', 'CT')
+            results = load_results_from_folder(folder)
+            
+            if 'packets' not in results:
+                continue
+            
+            # Build cumulative delivery over time
+            delivered = sorted([p['received_at'] for p in results['packets']])
+            if not delivered:
+                continue
+            
+            time_bins = np.arange(0, max(delivered) + 10, 10)
+            cumulative = []
+            
+            for t in time_bins:
+                count = sum(1 for d in delivered if d <= t)
+                cumulative.append(count)
+            
+            if strategy == 'CT':
+                ct_data = (time_bins, cumulative)
+            else:
+                mt_data = (time_bins, cumulative)
+        
+        if ct_data:
+            ax.plot(ct_data[0], ct_data[1], 'o-', linewidth=2, markersize=3, 
+                   label='CT', color='blue', alpha=0.7)
+        if mt_data:
+            ax.plot(mt_data[0], mt_data[1], 's-', linewidth=2, markersize=3, 
+                   label='MT', color='red', alpha=0.7)
+        
+        ax.set_xlabel('Time (seconds)', fontsize=11)
+        ax.set_ylabel('Packets Delivered (cumulative)', fontsize=11)
+        ax.set_title(f'PL = {pl_rate}', fontsize=12, fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("packet_delivery_with_loss_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: packet_delivery_with_loss_ct_vs_mt.png")
+
+
+def plot_registration_time_vs_packet_loss():
+    """Plot 3: Node Registration Time vs Packet Loss (CT vs MT)."""
+    print("  Generating registration time vs packet loss plot (CT vs MT)...")
+    
+    folders = find_results_folders()
+    if len(folders) < 2:
+        print("    Warning: Need simulation runs with different packet loss rates")
+        return
+    
+    # Group data by strategy and packet loss rate
+    ct_data = defaultdict(list)
+    mt_data = defaultdict(list)
+    
+    for folder, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        pl_rate = metadata.get('packet_loss_rate', 0)
+        results = load_results_from_folder(folder)
+        
+        if 'registration' not in results:
+            continue
+        
+        reg_times = [r['delta_time'] for r in results['registration']]
+        
+        if strategy == 'CT':
+            ct_data[pl_rate].extend(reg_times)
+        else:
+            mt_data[pl_rate].extend(reg_times)
+    
+    # Calculate averages
+    pl_rates = sorted(set(list(ct_data.keys()) + list(mt_data.keys())))
+    ct_avg = [statistics.mean(ct_data[pl]) if ct_data[pl] else 0 for pl in pl_rates]
+    mt_avg = [statistics.mean(mt_data[pl]) if mt_data[pl] else 0 for pl in pl_rates]
+    ct_std = [statistics.stdev(ct_data[pl]) if len(ct_data[pl]) > 1 else 0 for pl in pl_rates]
+    mt_std = [statistics.stdev(mt_data[pl]) if len(mt_data[pl]) > 1 else 0 for pl in pl_rates]
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    x_pos = np.arange(len(pl_rates))
+    width = 0.35
+    
+    bars1 = ax.bar(x_pos - width/2, ct_avg, width, yerr=ct_std, capsize=5,
+                   label='CT (Tree)', alpha=0.7, color='blue', edgecolor='black')
+    bars2 = ax.bar(x_pos + width/2, mt_avg, width, yerr=mt_std, capsize=5,
+                   label='MT (Mesh+Tree)', alpha=0.7, color='red', edgecolor='black')
+    
+    ax.set_xlabel('Packet Loss Rate', fontsize=12)
+    ax.set_ylabel('Average Registration Time (seconds)', fontsize=12)
+    ax.set_title('Node Registration Time vs Packet Loss: CT vs MT', fontsize=14, fontweight='bold')
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([f'{pl:.3f}' if pl > 0 else '0' for pl in pl_rates])
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.2f}s', ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig("registration_time_vs_packet_loss_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: registration_time_vs_packet_loss_ct_vs_mt.png")
+
+
+def plot_packet_delivery_time_vs_nodes():
+    """Plot 4: Average Time to Deliver a Packet vs Number of Nodes (CT vs MT)."""
+    print("  Generating packet delivery time vs node count plot (CT vs MT)...")
+    
+    folders = find_results_folders()
+    if len(folders) < 2:
+        print("    Warning: Need simulation runs with different node counts")
+        return
+    
+    # Group by strategy and node count
+    ct_data = defaultdict(list)
+    mt_data = defaultdict(list)
+    
+    for folder, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        node_count = metadata.get('node_count', 100)
+        results = load_results_from_folder(folder)
+        
+        if 'delays' not in results or not results['delays']:
+            continue
+        
+        avg_delay = statistics.mean(results['delays'])
+        
+        if strategy == 'CT':
+            ct_data[node_count].append(avg_delay)
+        else:
+            mt_data[node_count].append(avg_delay)
+    
+    # Calculate averages across multiple runs
+    node_counts = sorted(set(list(ct_data.keys()) + list(mt_data.keys())))
+    ct_avg = [statistics.mean(ct_data[nc]) if ct_data[nc] else None for nc in node_counts]
+    mt_avg = [statistics.mean(mt_data[nc]) if mt_data[nc] else None for nc in node_counts]
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Filter out None values
+    ct_valid = [(nc, avg) for nc, avg in zip(node_counts, ct_avg) if avg is not None]
+    mt_valid = [(nc, avg) for nc, avg in zip(node_counts, mt_avg) if avg is not None]
+    
+    if ct_valid:
+        nc_ct, avg_ct = zip(*ct_valid)
+        ax.plot(nc_ct, avg_ct, 'o-', linewidth=2, markersize=10, 
+               label='CT (Tree)', color='blue', alpha=0.7)
+    
+    if mt_valid:
+        nc_mt, avg_mt = zip(*mt_valid)
+        ax.plot(nc_mt, avg_mt, 's-', linewidth=2, markersize=10, 
+               label='MT (Mesh+Tree)', color='red', alpha=0.7)
+    
+    ax.set_xlabel('Number of Nodes', fontsize=12)
+    ax.set_ylabel('Average Time to Deliver Packet (seconds)', fontsize=12)
+    ax.set_title('Packet Delivery Time vs Network Size: CT vs MT', fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("packet_delivery_time_vs_nodes_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: packet_delivery_time_vs_nodes_ct_vs_mt.png")
+
+
+def plot_energy_vs_nodes():
+    """Plot 5: Average Energy Consumption vs Number of Nodes (CT vs MT)."""
+    print("  Generating average energy vs node count plot (CT vs MT)...")
+    
+    folders = find_results_folders()
+    if len(folders) < 1:
+        print("    Warning: No results folders found. Run simulations first.")
+        return
+    
+    # Group by strategy and node count
+    ct_data = defaultdict(list)
+    mt_data = defaultdict(list)
+    
+    for folder_path, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        node_count = metadata.get('node_count', 100)
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        # Try to calculate energy from available data
+        avg_energy = None
+        
+        # Method 1: Use energy data if available
+        if 'energy' in results and results['energy']:
+            final_time = max(results['energy'].keys())
+            final_energies = results['energy'][final_time]
+            battery_capacity = 2000 * 3.0 * 3600 / 1000  # Joules
+            energy_consumed = [battery_capacity - e for e in final_energies if e < battery_capacity and e > 0]
+            if energy_consumed:
+                avg_energy = statistics.mean(energy_consumed)
+        
+        # Method 2: Calculate from packet logs (estimate)
+        elif 'packets' in results and results['packets']:
+            # Estimate energy from packet transmission/reception
+            # TX: 17 mAh, RX: 18 mAh per packet (simplified)
+            voltage = 3.0
+            tx_current = 17.4 / 1000.0  # A (0 dBm)
+            rx_current = 18.8 / 1000.0  # A
+            packet_time = 0.0016  # ~50 bytes at 250 kbps
+            
+            tx_energy_per_pkt = voltage * tx_current * packet_time
+            rx_energy_per_pkt = voltage * rx_current * packet_time
+            
+            # Count packets per node (rough estimate)
+            packets_by_node = defaultdict(int)
+            for pkt in results['packets']:
+                packets_by_node[pkt.get('source', 0)] += 1
+            
+            if packets_by_node:
+                # Estimate: each node sends and receives packets
+                avg_packets = statistics.mean(list(packets_by_node.values()))
+                estimated_energy = (tx_energy_per_pkt + rx_energy_per_pkt) * avg_packets
+                avg_energy = estimated_energy
+        
+        if avg_energy is not None:
+            if strategy == 'CT':
+                ct_data[node_count].append(avg_energy)
+            else:
+                mt_data[node_count].append(avg_energy)
+    
+    # Check if we have any data
+    if not ct_data and not mt_data:
+        print("    ⚠️  Warning: No energy data found. Energy logging may not be enabled.")
+        print("    💡 Tip: Enable ENABLE_ENERGY_MODEL in config.py to generate energy data")
+        # Create empty plot with message
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.text(0.5, 0.5, 'No Energy Data Available\n\nEnable ENABLE_ENERGY_MODEL in config.py\nto generate energy consumption data', 
+               ha='center', va='center', fontsize=14, 
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax.set_xlabel('Number of Nodes', fontsize=12)
+        ax.set_ylabel('Average Energy Consumed per Node (Joules)', fontsize=12)
+        ax.set_title('Average Energy Consumption vs Network Size: CT vs MT', 
+                     fontsize=14, fontweight='bold')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        plt.tight_layout()
+        plt.savefig("energy_vs_nodes_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        print("    ✓ Saved: energy_vs_nodes_ct_vs_mt.png (empty - no data)")
+        return
+    
+    # Calculate averages
+    node_counts = sorted(set(list(ct_data.keys()) + list(mt_data.keys())))
+    ct_avg = [statistics.mean(ct_data[nc]) if ct_data[nc] else None for nc in node_counts]
+    mt_avg = [statistics.mean(mt_data[nc]) if mt_data[nc] else None for nc in node_counts]
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Filter out None values
+    ct_valid = [(nc, avg) for nc, avg in zip(node_counts, ct_avg) if avg is not None]
+    mt_valid = [(nc, avg) for nc, avg in zip(node_counts, mt_avg) if avg is not None]
+    
+    if ct_valid:
+        nc_ct, avg_ct = zip(*ct_valid)
+        ax.plot(nc_ct, avg_ct, 'o-', linewidth=2, markersize=10, 
+               label='CT (Tree)', color='blue', alpha=0.7)
+    
+    if mt_valid:
+        nc_mt, avg_mt = zip(*mt_valid)
+        ax.plot(nc_mt, avg_mt, 's-', linewidth=2, markersize=10, 
+               label='MT (Mesh+Tree)', color='red', alpha=0.7)
+    
+    if not ct_valid and not mt_valid:
+        ax.text(0.5, 0.5, 'No valid energy data points', ha='center', va='center', fontsize=12)
+    
+    ax.set_xlabel('Number of Nodes', fontsize=12)
+    ax.set_ylabel('Average Energy Consumed per Node (Joules)', fontsize=12)
+    ax.set_title('Average Energy Consumption vs Network Size: CT vs MT', 
+                 fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("energy_vs_nodes_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: energy_vs_nodes_ct_vs_mt.png")
+
+
+def plot_total_energy_vs_time():
+    """Plot 6: Total System Energy vs Time (CT vs MT)."""
+    print("  Generating total energy vs time plot (CT vs MT)...")
+    
+    folders = find_results_folders()
+    if len(folders) < 1:
+        print("    Warning: No results folders found. Run simulations first.")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    battery_capacity = 2000 * 3.0 * 3600 / 1000  # Joules
+    has_data = False
+    
+    for folder_path, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        times = []
+        total_energy = []
+        
+        # Method 1: Use energy data if available
+        if 'energy' in results and results['energy']:
+            times = sorted(results['energy'].keys())
+            for t in times:
+                energies = results['energy'][t]
+                consumed = sum([battery_capacity - e for e in energies if e < battery_capacity and e > 0])
+                total_energy.append(consumed)
+            has_data = True
+        
+        # Method 2: Estimate from packet logs over time
+        elif 'packets' in results and results['packets']:
+            # Group packets by time bins
+            time_bins = defaultdict(int)
+            for pkt in results['packets']:
+                time_bin = int(pkt.get('received_at', 0) // 100) * 100  # 100-second bins
+                time_bins[time_bin] += 1
+            
+            if time_bins:
+                times = sorted(time_bins.keys())
+                voltage = 3.0
+                tx_current = 17.4 / 1000.0
+                rx_current = 18.8 / 1000.0
+                packet_time = 0.0016
+                energy_per_packet = voltage * (tx_current + rx_current) * packet_time
+                
+                cumulative_energy = 0
+                for t in times:
+                    cumulative_energy += time_bins[t] * energy_per_packet
+                    total_energy.append(cumulative_energy)
+                has_data = True
+        
+        if times and total_energy:
+            label = f"{strategy} (PL={metadata.get('packet_loss_rate', 0)})"
+            color = 'blue' if strategy == 'CT' else 'red'
+            marker = 'o' if strategy == 'CT' else 's'
+            
+            ax.plot(times, total_energy, marker=marker, linewidth=2, markersize=4, 
+                   label=label, color=color, alpha=0.7)
+    
+    if not has_data:
+        print("    ⚠️  Warning: No energy data found. Energy logging may not be enabled.")
+        print("    💡 Tip: Enable ENABLE_ENERGY_MODEL in config.py to generate energy data")
+        ax.text(0.5, 0.5, 'No Energy Data Available\n\nEnable ENABLE_ENERGY_MODEL in config.py\nto generate energy consumption data', 
+               ha='center', va='center', fontsize=14, 
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+    
+    ax.set_xlabel('Time (seconds)', fontsize=12)
+    ax.set_ylabel('Total Energy Consumed (Joules)', fontsize=12)
+    ax.set_title('Total System Energy Consumption vs Time: CT vs MT', 
+                 fontsize=14, fontweight='bold')
+    if has_data:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("total_energy_vs_time_ct_vs_mt.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: total_energy_vs_time_ct_vs_mt.png")
+
+
+def plot_nodes_discovered_vs_killed():
+    """Plot 7: Number of Nodes Discovered vs Number of Nodes Killed (Recovery Analysis)."""
+    print("  Generating nodes discovered vs killed plot...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with node failures")
+        return
+
+
+# ============================================================================
+# REQUIRED PLOTS FROM PAPER TEMPLATE
+# ============================================================================
+# Note: Fig. 1 (Network Architecture) is a diagram that should be created
+# manually from simulation visualization or network topology data.
+# It shows the tree backbone with cross-layer mesh links.
+
+def plot_fig2_avg_join_time_vs_network_size():
+    """Fig. 2: Average join time versus network size."""
+    print("  Generating Fig. 2: Average join time vs network size...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with different network sizes")
+        return
+    
+    # Group by node count (aggregate multiple runs if available)
+    node_data = defaultdict(list)
+    
+    for folder_path, metadata in folders:
+        node_count = metadata.get('node_count', 100)
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'registration' not in results or not results['registration']:
+            print(f"    No registration data in {folder.name}")
+            continue
+        
+        # Calculate average join time for this run
+        join_times = []
+        for r in results['registration']:
+            # Try multiple ways to get join delay
+            delay = r.get('join_delay', r.get('delta_time', 0))
+            if delay == 0:
+                # Calculate from times
+                delay = r.get('registered_time', 0) - r.get('start_time', 0)
+            if delay > 0:
+                join_times.append(delay)
+        
+        if join_times:
+            avg_join_time = statistics.mean(join_times)
+            node_data[node_count].append(avg_join_time)
+            print(f"    Node count {node_count}: avg join time = {avg_join_time:.2f}s (from {len(join_times)} nodes)")
+    
+    if not node_data:
+        print("    Warning: No join time data found")
+        return
+    
+    # Calculate average across multiple runs for same node count
+    node_counts = sorted(node_data.keys())
+    avg_join_times = [statistics.mean(node_data[nc]) for nc in node_counts]
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if len(node_counts) == 1:
+        # Single point - use scatter plot and add note
+        ax.scatter(node_counts, avg_join_times, s=200, color='blue', zorder=3)
+        ax.axvline(node_counts[0], color='blue', linestyle='--', alpha=0.3, linewidth=1)
+        ax.axhline(avg_join_times[0], color='blue', linestyle='--', alpha=0.3, linewidth=1)
+        
+        # Add annotation
+        ax.annotate(f'Node Count: {node_counts[0]}\nAvg Join Time: {avg_join_times[0]:.2f}s',
+                   xy=(node_counts[0], avg_join_times[0]), 
+                   xytext=(10, 10), textcoords='offset points',
+                   bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+                   arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+        
+        # Add note about needing multiple network sizes
+        ax.text(0.5, 0.95, 'Note: Only one network size available.\nRun simulations with different SIM_NODE_COUNT values\n(e.g., 25, 50, 100, 200) to generate a line plot.',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+               ha='center')
+    else:
+        # Multiple points - use line plot
+        ax.plot(node_counts, avg_join_times, 'o-', linewidth=2, markersize=8, color='blue')
+    
+    ax.set_xlabel('Network Size (Number of Nodes)', fontsize=12)
+    ax.set_ylabel('Average Join Time (seconds)', fontsize=12)
+    ax.set_title('Fig. 2: Average Join Time versus Network Size', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Set reasonable axis limits
+    if len(node_counts) == 1:
+        ax.set_xlim(node_counts[0] - 20, node_counts[0] + 20)
+        ax.set_ylim(max(0, avg_join_times[0] - 50), avg_join_times[0] + 50)
+    
+    plt.tight_layout()
+    plt.savefig("fig2_avg_join_time_vs_network_size.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig2_avg_join_time_vs_network_size.png")
+    if len(node_counts) == 1:
+        print(f"    ⚠️  Only one network size ({node_counts[0]} nodes) found.")
+        print("    To generate a proper line plot, run simulations with different SIM_NODE_COUNT values (e.g., 25, 50, 100, 200)")
+
+
+def plot_fig3_nodes_killed_vs_disconnected():
+    """Fig. 3: Nodes killed versus number of nodes disconnected."""
+    print("  Generating Fig. 3: Nodes killed vs nodes disconnected...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with node failures")
+        return
+    
+    nodes_killed = []
+    nodes_disconnected = []
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        # Count killed nodes from recovery events or metadata
+        killed_count = metadata.get('num_nodes_to_fail', 0)
+        if killed_count == 0 and 'recoveries' in results:
+            killed_count = len(results['recoveries'])
+        
+        # Count disconnected nodes from orphan events
+        disconnected_count = 0
+        if 'orphans' in results:
+            # Count unique orphaned nodes
+            orphaned_nodes = set()
+            for orphan in results['orphans']:
+                orphaned_nodes.add(orphan['node_id'])
+            disconnected_count = len(orphaned_nodes)
+        
+        if killed_count > 0:
+            nodes_killed.append(killed_count)
+            nodes_disconnected.append(disconnected_count)
+    
+    if not nodes_killed:
+        print("    Warning: No node failure data found")
+        return
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if len(nodes_killed) == 1:
+        # Single point - use scatter with annotation
+        ax.scatter(nodes_killed, nodes_disconnected, s=200, alpha=0.7, color='red', zorder=3)
+        ax.axvline(nodes_killed[0], color='red', linestyle='--', alpha=0.3, linewidth=1)
+        ax.axhline(nodes_disconnected[0], color='red', linestyle='--', alpha=0.3, linewidth=1)
+        
+        # Add annotation
+        ax.annotate(f'Killed: {nodes_killed[0]}\nDisconnected: {nodes_disconnected[0]}',
+                   xy=(nodes_killed[0], nodes_disconnected[0]), 
+                   xytext=(10, 10), textcoords='offset points',
+                   bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+                   arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+        
+        # Add note
+        ax.text(0.5, 0.95, 'Note: Only one failure scenario available.\nRun simulations with different NUM_NODES_TO_FAIL values\n(e.g., 2, 5, 10, 20) to generate a trend line.',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+               ha='center')
+        
+        # Set reasonable axis limits
+        ax.set_xlim(max(0, nodes_killed[0] - 2), nodes_killed[0] + 2)
+        ax.set_ylim(max(0, nodes_disconnected[0] - 2), nodes_disconnected[0] + 2)
+    else:
+        # Multiple points - use scatter with trend line
+        ax.scatter(nodes_killed, nodes_disconnected, s=100, alpha=0.6, color='red', zorder=3)
+        # Add trend line
+        z = np.polyfit(nodes_killed, nodes_disconnected, 1)
+        p = np.poly1d(z)
+        x_trend = np.linspace(min(nodes_killed), max(nodes_killed), 100)
+        ax.plot(x_trend, p(x_trend), '--', alpha=0.5, color='gray', linewidth=2, 
+               label=f'Trend: y={z[0]:.2f}x+{z[1]:.2f}')
+        ax.legend()
+    
+    ax.set_xlabel('Number of Nodes Killed', fontsize=12)
+    ax.set_ylabel('Number of Nodes Disconnected', fontsize=12)
+    ax.set_title('Fig. 3: Nodes Killed versus Number of Nodes Disconnected', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("fig3_nodes_killed_vs_disconnected.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig3_nodes_killed_vs_disconnected.png")
+    if len(nodes_killed) == 1:
+        print(f"    ⚠️  Only one failure scenario ({nodes_killed[0]} nodes killed) found.")
+        print("    To generate a trend line, run simulations with different NUM_NODES_TO_FAIL values (e.g., 2, 5, 10, 20)")
+
+
+def plot_fig4_network_lifetime_vs_initial_energy():
+    """Fig. 4: Network lifetime vs initial energy for different traffic loads."""
+    print("  Generating Fig. 4: Network lifetime vs initial energy...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with different energy budgets")
+        return
+    
+    # Initial energy from config (BATTERY_ENERGY_TOTAL = 21600 J)
+    INITIAL_ENERGY = 21600.0  # Joules from config
+    
+    # Group by traffic load
+    low_traffic_data = []
+    high_traffic_data = []
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        # Determine traffic load (use packet loss as proxy, or data interval)
+        packet_loss = metadata.get('packet_loss_rate', 0)
+        # For now, classify by packet loss rate (low < 0.001, high >= 0.001)
+        is_low_traffic = packet_loss < 0.001
+        
+        # Calculate network lifetime from snapshots (time until <80% connected)
+        network_lifetime = None
+        if 'snapshots' in results and results['snapshots']:
+            snapshot_times = sorted(results['snapshots'].keys())
+            total_nodes = None
+            
+            for t in snapshot_times:
+                snapshot = results['snapshots'][t]
+                if total_nodes is None and snapshot:
+                    total_nodes = len(snapshot)
+                
+                if total_nodes and total_nodes > 0:
+                    # Count connected nodes (have parent or are ROOT/CH, and not failed)
+                    connected = sum(1 for node in snapshot 
+                                   if not node.get('is_failed', False) and
+                                   (node.get('parent_gui') or 
+                                    node.get('role') in ['ROOT', 'CLUSTER_HEAD'] or
+                                    (node.get('role') == 'REGISTERED' and node.get('parent_gui'))))
+                    
+                    connected_ratio = connected / total_nodes
+                    if connected_ratio < 0.8:
+                        network_lifetime = t
+                        break
+            
+            # If never dropped below 80%, use simulation end time
+            if network_lifetime is None and snapshot_times:
+                network_lifetime = max(snapshot_times)
+        
+        # Fallback: use energy data if snapshots not available
+        if network_lifetime is None and 'energy' in results and results['energy']:
+            times = sorted(results['energy'].keys())
+            total_nodes = None
+            for t in times:
+                energies = results['energy'][t]
+                if total_nodes is None:
+                    total_nodes = len(energies)
+                
+                if total_nodes and total_nodes > 0:
+                    alive_count = sum(1 for e in energies if e > 0)
+                    connected_ratio = alive_count / total_nodes
+                    if connected_ratio < 0.8:
+                        network_lifetime = t
+                        break
+            
+            # If never dropped below 80%, use last time
+            if network_lifetime is None and times:
+                network_lifetime = max(times)
+        
+        # Use simulation duration from metadata if still None
+        if network_lifetime is None:
+            network_lifetime = metadata.get('simulation_duration', 5000)
+        
+        if network_lifetime is not None:
+            if is_low_traffic:
+                low_traffic_data.append((INITIAL_ENERGY, network_lifetime))
+            else:
+                high_traffic_data.append((INITIAL_ENERGY, network_lifetime))
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # For now, we only have one initial energy value, so plot points
+    # In real experiments, you'd vary initial energy
+    if low_traffic_data:
+        energies, lifetimes = zip(*low_traffic_data)
+        if len(set(energies)) > 1:
+            # Multiple energy values - plot line
+            energy_dict = defaultdict(list)
+            for e, l in low_traffic_data:
+                energy_dict[e].append(l)
+            energies = sorted(energy_dict.keys())
+            lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
+            ax.plot(energies, lifetimes, 'o-', linewidth=2, markersize=10, label='Low traffic', color='blue')
+        else:
+            # Single point
+            ax.scatter(energies[0], lifetimes[0], s=200, marker='o', label='Low traffic', color='blue', alpha=0.7)
+    
+    if high_traffic_data:
+        energies, lifetimes = zip(*high_traffic_data)
+        if len(set(energies)) > 1:
+            energy_dict = defaultdict(list)
+            for e, l in high_traffic_data:
+                energy_dict[e].append(l)
+            energies = sorted(energy_dict.keys())
+            lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
+            ax.plot(energies, lifetimes, 's-', linewidth=2, markersize=10, label='High traffic', color='red')
+        else:
+            ax.scatter(energies[0], lifetimes[0], s=200, marker='s', label='High traffic', color='red', alpha=0.7)
+    
+    ax.set_xlabel('Initial Energy E₀ [J]', fontsize=12)
+    ax.set_ylabel('Network Lifetime [s]', fontsize=12)
+    ax.set_title('Fig. 4: Network Lifetime vs Initial Energy Budget\n(Network lifetime = time until <80% nodes connected)', 
+                 fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("fig4_network_lifetime_vs_initial_energy.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig4_network_lifetime_vs_initial_energy.png")
+
+
+def plot_fig5_packets_sent_vs_delivered():
+    """Fig. 5: Packets sent vs packets delivered for different packet loss rates."""
+    print("  Generating Fig. 5: Packets sent vs delivered...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with different packet loss rates")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Group by packet loss rate
+    pl_data = defaultdict(lambda: {'sent': [], 'delivered': []})
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'packets' not in results or not results['packets']:
+            continue
+        
+        packet_loss = metadata.get('packet_loss_rate', 0)
+        
+        # Count sent and delivered packets
+        sent = len(results['packets'])
+        delivered = sum(1 for p in results['packets'] if p.get('received_at', 0) > 0)
+        
+        if sent > 0:
+            pl_data[packet_loss]['sent'].append(sent)
+            pl_data[packet_loss]['delivered'].append(delivered)
+    
+    if not pl_data:
+        print("    Warning: No packet data found")
+        return
+    
+    # Plot for different packet loss rates
+    packet_loss_rates = sorted(pl_data.keys())
+    markers = ['o', '+', 's']
+    linestyles = ['--', '-', '-']
+    fills = [False, False, True]
+    
+    for idx, pl_rate in enumerate(packet_loss_rates):
+        if len(pl_data[pl_rate]['sent']) == 0:
+            continue
+        
+        total_sent = sum(pl_data[pl_rate]['sent'])
+        total_delivered = sum(pl_data[pl_rate]['delivered'])
+        
+        marker = markers[idx % len(markers)]
+        linestyle = linestyles[idx % len(linestyles)]
+        filled = fills[idx % len(fills)]
+        
+        label = f"Packet Loss = {pl_rate}"
+        color = 'black' if idx == 0 else ('blue' if idx == 1 else 'red')
+        
+        if filled:
+            ax.plot(total_sent, total_delivered, marker=marker, linestyle=linestyle, 
+                   linewidth=2, markersize=10, label=label, color=color, markerfacecolor=color)
+        else:
+            ax.plot(total_sent, total_delivered, marker=marker, linestyle=linestyle, 
+                   linewidth=2, markersize=10, label=label, color=color, markerfacecolor='none', 
+                   markeredgewidth=2)
+    
+    ax.set_xlabel('Packets Sent [packets]', fontsize=12)
+    ax.set_ylabel('Packets Delivered [packets]', fontsize=12)
+    ax.set_title('Fig. 5: Packets Sent vs Packets Delivered\n(Different Packet Loss Rates)', 
+                 fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("fig5_packets_sent_vs_delivered.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig5_packets_sent_vs_delivered.png")
+
+
+def plot_fig6_ct_mesh_vs_ct_only():
+    """Fig. 6: CT+Mesh vs CT Only comparison."""
+    print("  Generating Fig. 6: CT+Mesh vs CT Only...")
+    
+    folders = find_results_folders()
+    if len(folders) < 1:
+        print("    Warning: Need simulation runs")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    INITIAL_ENERGY = 21600.0  # Joules from config
+    
+    ct_times = []
+    ct_energy = []
+    mt_times = []
+    mt_energy = []
+    
+    for folder_path, metadata in folders:
+        strategy = metadata.get('routing_strategy', 'CT')
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'energy' not in results or not results['energy']:
+            continue
+        
+        times = sorted(results['energy'].keys())
+        total_energy_consumed = []
+        
+        for t in times:
+            energies = results['energy'][t]
+            # Calculate consumed energy (initial - current)
+            consumed = sum([INITIAL_ENERGY - e for e in energies if e > 0 and e < INITIAL_ENERGY])
+            total_energy_consumed.append(consumed)
+        
+        if strategy == 'CT':
+            ct_times = times
+            ct_energy = total_energy_consumed
+        else:
+            mt_times = times
+            mt_energy = total_energy_consumed
+    
+    if ct_times and ct_energy:
+        ax.plot(ct_times, ct_energy, 's-', linewidth=2, markersize=4, 
+               label='CT Only', color='blue', alpha=0.7)
+    
+    if mt_times and mt_energy:
+        ax.plot(mt_times, mt_energy, 'o--', linewidth=2, markersize=4, 
+               label='CT+Mesh', color='red', alpha=0.7)
+    
+    if not ct_times and not mt_times:
+        ax.text(0.5, 0.5, 'No energy data available', ha='center', va='center', fontsize=12)
+    
+    ax.set_xlabel('Time [s]', fontsize=12)
+    ax.set_ylabel('Total Energy Consumed [J]', fontsize=12)
+    ax.set_title('Fig. 6: CT+Mesh vs CT Only Comparison\n(Energy Consumption Over Time)', 
+                 fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("fig6_ct_mesh_vs_ct_only.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig6_ct_mesh_vs_ct_only.png")
+
+
+def plot_fig7_energy_impact_on_lifetime_metrics():
+    """Fig. 7: Impact of initial energy on lifetime metrics (bar chart)."""
+    print("  Generating Fig. 7: Energy impact on lifetime metrics...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs")
+        return
+    
+    INITIAL_ENERGY = 21600.0  # Joules from config
+    
+    # Group data by initial energy (for now, all use same initial energy)
+    energy_data = defaultdict(lambda: {'first_death': [], 'fifty_percent': [], 'eighty_percent': []})
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        # Use snapshots for accurate connectivity, fallback to energy
+        first_death_time = None
+        fifty_percent_time = None
+        eighty_percent_time = None
+        total_nodes = None
+        
+        # Try snapshots first
+        if 'snapshots' in results and results['snapshots']:
+            snapshot_times = sorted(results['snapshots'].keys())
+            
+            for t in snapshot_times:
+                snapshot = results['snapshots'][t]
+                if total_nodes is None and snapshot:
+                    total_nodes = len(snapshot)
+                
+                if total_nodes and total_nodes > 0:
+                    # Count alive nodes (not failed)
+                    alive = sum(1 for node in snapshot if not node.get('is_failed', False))
+                    
+                    # Count connected nodes (have parent or are ROOT/CH)
+                    connected = sum(1 for node in snapshot 
+                                  if (node.get('parent_gui') or 
+                                      node.get('role') in ['ROOT', 'CLUSTER_HEAD'] or
+                                      (node.get('role') == 'REGISTERED' and node.get('parent_gui'))) 
+                                  and not node.get('is_failed', False))
+                    
+                    # First node death
+                    if first_death_time is None and alive < total_nodes:
+                        first_death_time = t
+                    
+                    # 50% nodes dead
+                    if fifty_percent_time is None and alive < total_nodes * 0.5:
+                        fifty_percent_time = t
+                    
+                    # <80% connected
+                    if eighty_percent_time is None and connected < total_nodes * 0.8:
+                        eighty_percent_time = t
+                        break
+        
+        # Fallback to energy data
+        elif 'energy' in results and results['energy']:
+            times = sorted(results['energy'].keys())
+            for t in times:
+                energies = results['energy'][t]
+                if total_nodes is None:
+                    total_nodes = len(energies)
+                
+                if total_nodes and total_nodes > 0:
+                    alive = sum(1 for e in energies if e > 0)
+                    connected = alive  # Simplified
+                    
+                    if first_death_time is None and alive < total_nodes:
+                        first_death_time = t
+                    if fifty_percent_time is None and alive < total_nodes * 0.5:
+                        fifty_percent_time = t
+                    if eighty_percent_time is None and connected < total_nodes * 0.8:
+                        eighty_percent_time = t
+                        break
+        
+        if first_death_time:
+            energy_data[INITIAL_ENERGY]['first_death'].append(first_death_time)
+        if fifty_percent_time:
+            energy_data[INITIAL_ENERGY]['fifty_percent'].append(fifty_percent_time)
+        if eighty_percent_time:
+            energy_data[INITIAL_ENERGY]['eighty_percent'].append(eighty_percent_time)
+    
+    if not energy_data:
+        print("    Warning: No lifetime data found")
+        return
+    
+    # Prepare data for bar chart
+    energies = sorted(energy_data.keys())
+    first_death = [statistics.mean(energy_data[e]['first_death']) if energy_data[e]['first_death'] else 0 for e in energies]
+    fifty_percent = [statistics.mean(energy_data[e]['fifty_percent']) if energy_data[e]['fifty_percent'] else 0 for e in energies]
+    eighty_percent = [statistics.mean(energy_data[e]['eighty_percent']) if energy_data[e]['eighty_percent'] else 0 for e in energies]
+    
+    x = np.arange(len(energies))
+    width = 0.25
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.bar(x - width, first_death, width, label='First node death', color='blue')
+    ax.bar(x, fifty_percent, width, label='50% nodes dead', color='red')
+    ax.bar(x + width, eighty_percent, width, label='< 80% connected', color='orange')
+    
+    ax.set_xlabel('Initial Energy E₀ [J]', fontsize=12)
+    ax.set_ylabel('Time [s]', fontsize=12)
+    ax.set_title('Fig. 7: Impact of Initial Energy on Lifetime Metrics', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{e:.0f}" for e in energies])
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig("fig7_energy_impact_on_lifetime_metrics.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig7_energy_impact_on_lifetime_metrics.png")
+
+
+def plot_fig8_pdr_over_time():
+    """Fig. 8: Packet delivery ratio (PDR) over time."""
+    print("  Generating Fig. 8: PDR over time...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with packet data")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    has_data = False
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'packets' not in results or not results['packets']:
+            continue
+        
+        # Calculate PDR over time windows
+        max_time = max([p.get('created_at', 0) for p in results['packets']], default=5000)
+        time_bins = np.arange(0, max_time + 100, 100)  # 100-second windows
+        pdr_values = []
+        
+        for t_end in time_bins[1:]:
+            t_start = t_end - 100
+            packets_in_window = [p for p in results['packets'] 
+                               if t_start <= p.get('created_at', 0) < t_end]
+            
+            if packets_in_window:
+                delivered = sum(1 for p in packets_in_window if p.get('received_at', 0) > 0)
+                pdr = delivered / len(packets_in_window) if packets_in_window else 0
+                pdr_values.append((t_end, pdr))
+        
+        if pdr_values:
+            times, pdrs = zip(*pdr_values)
+            strategy = metadata.get('routing_strategy', 'CT')
+            label = f"{strategy} (PL={metadata.get('packet_loss_rate', 0)})"
+            color = 'blue' if strategy == 'CT' else 'red'
+            ax.plot(times, pdrs, linewidth=2, label=label, color=color, alpha=0.7)
+            has_data = True
+    
+    if not has_data:
+        ax.text(0.5, 0.5, 'No packet data available', ha='center', va='center', fontsize=12)
+    
+    ax.set_xlabel('Time [s]', fontsize=12)
+    ax.set_ylabel('Packet Delivery Ratio (PDR)', fontsize=12)
+    ax.set_title('Fig. 8: Packet Delivery Ratio (PDR) Over Time', fontsize=14, fontweight='bold')
+    if has_data:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1.1)
+    
+    plt.tight_layout()
+    plt.savefig("fig8_pdr_over_time.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig8_pdr_over_time.png")
+
+
+def plot_fig9_avg_remaining_energy_over_time():
+    """Fig. 9: Average remaining energy over time for different traffic loads."""
+    print("  Generating Fig. 9: Average remaining energy over time...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with energy data")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Group by traffic load (use packet loss as proxy for now)
+    traffic_data = defaultdict(list)
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        if 'energy' not in results or not results['energy']:
+            continue
+        
+        packet_loss = metadata.get('packet_loss_rate', 0)
+        # Classify traffic load (simplified)
+        if packet_loss < 0.0001:
+            traffic = 'low'
+        elif packet_loss < 0.001:
+            traffic = 'medium'
+        else:
+            traffic = 'high'
+        
+        times = sorted(results['energy'].keys())
+        avg_energies = []
+        
+        for t in times:
+            energies = results['energy'][t]
+            if energies:
+                # Get all energy values (including zeros for dead nodes)
+                all_energies = [e for e in energies]
+                if all_energies:
+                    avg_energy = statistics.mean(all_energies)
+                    avg_energies.append((t, avg_energy))
+        
+        if avg_energies:
+            traffic_data[traffic].append(avg_energies)
+    
+    colors = {'low': 'blue', 'medium': 'orange', 'high': 'red'}
+    labels = {'low': 'Low traffic', 'medium': 'Medium traffic', 'high': 'High traffic'}
+    
+    has_data = False
+    for traffic in ['low', 'medium', 'high']:
+        if traffic_data[traffic]:
+            # For each run, interpolate to common time points
+            all_times = set()
+            for data in traffic_data[traffic]:
+                all_times.update([t for t, _ in data])
+            
+            if all_times:
+                times = sorted(all_times)
+                # Sample every 100 seconds for cleaner plot
+                times_sampled = [t for t in times if t % 100 < 50]  # Approximate
+                if not times_sampled:
+                    times_sampled = times[::max(1, len(times)//50)]  # Sample 50 points
+                
+                avg_values = []
+                for t in times_sampled:
+                    values = []
+                    for data in traffic_data[traffic]:
+                        # Find closest time point
+                        closest = min(data, key=lambda x: abs(x[0] - t))
+                        if abs(closest[0] - t) < 50:  # Within 50 seconds
+                            values.append(closest[1])
+                    if values:
+                        avg_values.append(statistics.mean(values))
+                
+                if avg_values:
+                    ax.plot(times_sampled[:len(avg_values)], avg_values, linewidth=2, 
+                           label=labels[traffic], color=colors[traffic], alpha=0.7, marker='o', markersize=3)
+                    has_data = True
+    
+    if not has_data:
+        ax.text(0.5, 0.5, 'No energy data available', ha='center', va='center', fontsize=12)
+    
+    ax.set_xlabel('Time [s]', fontsize=12)
+    ax.set_ylabel('Average Remaining Energy [J]', fontsize=12)
+    ax.set_title('Fig. 9: Average Remaining Energy Over Time\n(Different Traffic Loads)', 
+                 fontsize=14, fontweight='bold')
+    if has_data:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("fig9_avg_remaining_energy_over_time.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig9_avg_remaining_energy_over_time.png")
+
+
+def plot_fig10_fraction_connected_nodes_over_time():
+    """Fig. 10: Fraction of connected nodes over time for different traffic loads."""
+    print("  Generating Fig. 10: Fraction of connected nodes over time...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with connectivity data")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Group by traffic load
+    traffic_data = defaultdict(list)
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        packet_loss = metadata.get('packet_loss_rate', 0)
+        if packet_loss < 0.0001:
+            traffic = 'low'
+        elif packet_loss < 0.001:
+            traffic = 'medium'
+        else:
+            traffic = 'high'
+        
+        connected_fractions = []
+        total_nodes = None
+        
+        # Use snapshots for accurate connectivity
+        if 'snapshots' in results and results['snapshots']:
+            snapshot_times = sorted(results['snapshots'].keys())
+            
+            for t in snapshot_times:
+                snapshot = results['snapshots'][t]
+                if total_nodes is None and snapshot:
+                    total_nodes = len(snapshot)
+                
+                if total_nodes and total_nodes > 0:
+                    # Count connected nodes (have parent or are ROOT/CH, and not failed)
+                    connected = sum(1 for node in snapshot 
+                                  if (node.get('parent_gui') or 
+                                      node.get('role') in ['ROOT', 'CLUSTER_HEAD'] or
+                                      (node.get('role') == 'REGISTERED' and node.get('parent_gui'))) 
+                                  and not node.get('is_failed', False))
+                    
+                    fraction = connected / total_nodes
+                    connected_fractions.append((t, fraction))
+        
+        # Fallback to energy data
+        elif 'energy' in results and results['energy']:
+            times = sorted(results['energy'].keys())
+            for t in times:
+                energies = results['energy'][t]
+                if total_nodes is None:
+                    total_nodes = len(energies)
+                
+                # Count alive nodes (simplified connectivity)
+                connected = sum(1 for e in energies if e > 0)
+                fraction = connected / total_nodes if total_nodes > 0 else 0
+                connected_fractions.append((t, fraction))
+        
+        if connected_fractions:
+            traffic_data[traffic].append(connected_fractions)
+    
+    colors = {'low': 'blue', 'medium': 'orange', 'high': 'red'}
+    labels = {'low': 'Low traffic', 'medium': 'Medium traffic', 'high': 'High traffic'}
+    
+    has_data = False
+    for traffic in ['low', 'medium', 'high']:
+        if traffic_data[traffic]:
+            # Average across runs
+            all_times = set()
+            for data in traffic_data[traffic]:
+                all_times.update([t for t, _ in data])
+            
+            if all_times:
+                times = sorted(all_times)
+                # Sample for cleaner plot
+                times_sampled = times[::max(1, len(times)//100)]  # Sample 100 points max
+                
+                avg_fractions = []
+                for t in times_sampled:
+                    values = []
+                    for data in traffic_data[traffic]:
+                        closest = min(data, key=lambda x: abs(x[0] - t))
+                        if abs(closest[0] - t) < 50:
+                            values.append(closest[1])
+                    if values:
+                        avg_fractions.append(statistics.mean(values))
+                
+                if avg_fractions:
+                    ax.plot(times_sampled[:len(avg_fractions)], avg_fractions, linewidth=2, 
+                           label=labels[traffic], color=colors[traffic], alpha=0.7, marker='o', markersize=3)
+                    has_data = True
+    
+    if has_data:
+        ax.axhline(y=0.8, color='gray', linestyle='--', alpha=0.5, label='80% threshold')
+    
+    ax.set_xlabel('Time [s]', fontsize=12)
+    ax.set_ylabel('Fraction of Nodes Connected to Sink', fontsize=12)
+    ax.set_title('Fig. 10: Fraction of Connected Nodes Over Time\n(Different Traffic Loads)', 
+                 fontsize=14, fontweight='bold')
+    if has_data:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1.1)
+    
+    plt.tight_layout()
+    plt.savefig("fig10_fraction_connected_nodes_over_time.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig10_fraction_connected_nodes_over_time.png")
+
+
+def plot_fig11_cdf_node_lifetimes():
+    """Fig. 11: CDF of node lifetimes for cluster heads vs leaf nodes."""
+    print("  Generating Fig. 11: CDF of node lifetimes...")
+    
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with role and energy data")
+        return
+    
+    # Collect node lifetimes by role
+    ch_lifetimes = []
+    leaf_lifetimes = []
+    
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        
+        # Get node roles from role_changes or snapshots
+        node_roles = {}  # {node_id: most_recent_role}
+        
+        if 'role_changes' in results:
+            for rc in results['role_changes']:
+                node_id = rc['node_id']
+                node_roles[node_id] = rc['new_role']
+        
+        # Also check snapshots for roles
+        if 'snapshots' in results and results['snapshots']:
+            # Use latest snapshot
+            latest_time = max(results['snapshots'].keys())
+            for node in results['snapshots'][latest_time]:
+                node_id = node['node_id']
+                node_roles[node_id] = node.get('role', 'REGISTERED')
+        
+        # Find death times from energy data or snapshots
+        node_death_times = {}  # {node_id: death_time}
+        
+        # Method 1: Use snapshots to find when nodes become failed
+        if 'snapshots' in results and results['snapshots']:
+            snapshot_times = sorted(results['snapshots'].keys())
+            for t in snapshot_times:
+                snapshot = results['snapshots'][t]
+                for node in snapshot:
+                    node_id = node['node_id']
+                    if node.get('is_failed', False) and node_id not in node_death_times:
+                        node_death_times[node_id] = t
+        
+        # Method 2: Use energy data as fallback
+        if not node_death_times and 'energy' in results and results['energy']:
+            times = sorted(results['energy'].keys())
+            node_energy_tracking = {}  # {node_id: [(time, energy), ...]}
+            
+            for t in times:
+                energies = results['energy'][t]
+                for node_id, energy in enumerate(energies):
+                    if node_id not in node_energy_tracking:
+                        node_energy_tracking[node_id] = []
+                    node_energy_tracking[node_id].append((t, energy))
+            
+            # Find when energy drops to 0
+            for node_id, energy_history in node_energy_tracking.items():
+                for t, energy in energy_history:
+                    if energy <= 0 and node_id not in node_death_times:
+                        node_death_times[node_id] = t
+                        break
+        
+        # Classify by role
+        for node_id, death_time in node_death_times.items():
+            role = node_roles.get(node_id, 'REGISTERED')
+            if 'CLUSTER_HEAD' in role or 'ROOT' in role:
+                ch_lifetimes.append(death_time)
+            elif 'REGISTERED' in role:
+                leaf_lifetimes.append(death_time)
+    
+    if not ch_lifetimes and not leaf_lifetimes:
+        print("    Warning: No node lifetime data found")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    if ch_lifetimes:
+        sorted_ch = sorted(ch_lifetimes)
+        ch_cdf = np.arange(1, len(sorted_ch) + 1) / len(sorted_ch)
+        ax.plot(sorted_ch, ch_cdf, linewidth=2, label='Cluster Heads', color='blue', marker='o', markersize=4)
+    
+    if leaf_lifetimes:
+        sorted_leaf = sorted(leaf_lifetimes)
+        leaf_cdf = np.arange(1, len(sorted_leaf) + 1) / len(sorted_leaf)
+        ax.plot(sorted_leaf, leaf_cdf, linewidth=2, label='Leaf Nodes', color='red', marker='s', markersize=4)
+    
+    ax.set_xlabel('Node Lifetime [s]', fontsize=12)
+    ax.set_ylabel('Cumulative Probability', fontsize=12)
+    ax.set_title('Fig. 11: CDF of Node Lifetimes\n(Cluster Heads vs Leaf Nodes)', 
+                 fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1.1)
+    
+    plt.tight_layout()
+    plt.savefig("fig11_cdf_node_lifetimes.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig11_cdf_node_lifetimes.png")
+    
+    # Load orphan and recovery data
+    killed_counts = []
+    discovered_counts = []
+    
+    for folder_path, metadata in folders:
+        num_killed = metadata.get('num_nodes_to_fail', 0)
+        if num_killed == 0:
+            continue
+        
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        
+        # Load orphan events
+        orphan_file = folder / "orphan_events.csv"
+        orphan_count = 0
+        if orphan_file.exists():
+            with open(orphan_file, 'r') as f:
+                reader = csv.DictReader(f)
+                orphan_count = sum(1 for _ in reader)
+        
+        # Load recovery events
+        recovery_file = folder / "recovery_events.csv"
+        recovered_count = 0
+        if recovery_file.exists():
+            with open(recovery_file, 'r') as f:
+                reader = csv.DictReader(f)
+                recovered_count = sum(1 for _ in reader)
+        
+        # Nodes that were affected (orphaned) but may have recovered
+        affected_count = orphan_count
+        
+        killed_counts.append(num_killed)
+        discovered_counts.append(affected_count)
+    
+    if not killed_counts:
+        print("    Warning: No node failure data found")
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    ax.scatter(killed_counts, discovered_counts, s=100, alpha=0.7, 
+              color='red', edgecolors='black', linewidths=2)
+    
+    # Add trend line if enough points
+    if len(killed_counts) > 1:
+        z = np.polyfit(killed_counts, discovered_counts, 1)
+        p = np.poly1d(z)
+        x_trend = np.linspace(min(killed_counts), max(killed_counts), 100)
+        ax.plot(x_trend, p(x_trend), '--', color='blue', alpha=0.5, 
+               label=f'Trend: y={z[0]:.2f}x+{z[1]:.2f}')
+        ax.legend()
+    
+    ax.set_xlabel('Number of Nodes Killed', fontsize=12)
+    ax.set_ylabel('Number of Nodes Affected (Orphaned)', fontsize=12)
+    ax.set_title('Cascading Failure Analysis: Nodes Affected vs Nodes Killed', 
+                 fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("nodes_discovered_vs_killed.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: nodes_discovered_vs_killed.png")
+
+
+# ============================================================================
 # MAIN FUNCTION
 # ============================================================================
 
@@ -1557,19 +3235,18 @@ def main():
     print("Make sure you have run the simulation first to generate CSV files.\n")
     
     plots_to_generate = [
-        ("Join Time Analysis", plot_join_time_analysis),
-        ("Cluster Analysis", plot_cluster_analysis),
-        ("TX Power Analysis", plot_tx_power_analysis),
-        ("Network Lifetime", plot_network_lifetime),
-        ("Packet Tracing", plot_packet_tracing),
-        ("Protocol Metrics", plot_protocol_metrics),
-        ("Config Parameters", plot_config_parameters),
-        ("Batch Simulation Averages", plot_batch_simulation_averages),
-        ("Packet Loss vs Join Time", plot_packet_loss_vs_join_time),
-        ("Config Parameters Over Time", plot_config_parameters_over_time),
-        ("Max Nodes vs Clusters", plot_max_nodes_vs_clusters),
-        ("TX Power vs Network Lifetime", plot_tx_power_vs_network_lifetime),
-        ("Packet Size vs Network Lifetime", plot_packet_size_vs_network_lifetime),
+        # Required Plots from Paper Template (Fig. 2-11)
+        # Note: Fig. 1 (Network Architecture) is a diagram to be created manually
+        ("Fig. 2: Average Join Time vs Network Size", plot_fig2_avg_join_time_vs_network_size),
+        ("Fig. 3: Nodes Killed vs Disconnected", plot_fig3_nodes_killed_vs_disconnected),
+        ("Fig. 4: Network Lifetime vs Initial Energy", plot_fig4_network_lifetime_vs_initial_energy),
+        ("Fig. 5: Packets Sent vs Delivered", plot_fig5_packets_sent_vs_delivered),
+        ("Fig. 6: CT+Mesh vs CT Only", plot_fig6_ct_mesh_vs_ct_only),
+        ("Fig. 7: Energy Impact on Lifetime Metrics", plot_fig7_energy_impact_on_lifetime_metrics),
+        ("Fig. 8: PDR Over Time", plot_fig8_pdr_over_time),
+        ("Fig. 9: Avg Remaining Energy Over Time", plot_fig9_avg_remaining_energy_over_time),
+        ("Fig. 10: Fraction Connected Nodes Over Time", plot_fig10_fraction_connected_nodes_over_time),
+        ("Fig. 11: CDF of Node Lifetimes", plot_fig11_cdf_node_lifetimes),
     ]
     
     results = {}
