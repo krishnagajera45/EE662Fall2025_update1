@@ -1,3 +1,0 @@
-node_id,time,reason,parent_id
-12,109.907948,Parent node 11 became router (cannot accept children),11
-33,142.598588,Parent node 23 became router (cannot accept children),23

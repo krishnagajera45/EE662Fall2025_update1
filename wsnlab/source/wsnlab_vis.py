@@ -310,6 +310,36 @@ class Simulator(wsnlab.Simulator):
             thr = Thread(target=super().run)
             thr.setDaemon(True)
             thr.start()
+            
+            # Schedule auto-close after simulation duration completes
+            # This allows batch runs to proceed automatically
+            try:
+                # Store thread reference for checking
+                self._sim_thread = thr
+                
+                # Schedule periodic check to see if simulation thread is done
+                def check_and_close():
+                    """Check if simulation is done and close window."""
+                    try:
+                        if not self._sim_thread.is_alive():
+                            # Simulation thread has finished, close window after brief delay
+                            if self.tkplot and self.tkplot.tk:
+                                # Give a moment for final rendering, then close
+                                self.tkplot.tk.after(500, lambda: self.tkplot.tk.quit())
+                                self.tkplot.tk.after(600, lambda: self.tkplot.tk.destroy())
+                        else:
+                            # Simulation still running, check again in 0.5 seconds
+                            self.tkplot.tk.after(500, check_and_close)
+                    except Exception:
+                        pass
+                
+                # Start checking after simulation should be done
+                # With timescale 0.00001, 5000s simulation = 0.05s real time, but add buffer
+                # Check every 0.5 seconds starting immediately
+                self.tkplot.tk.after(500, check_and_close)
+            except Exception:
+                pass  # If auto-close fails, window will stay open (user can close manually)
+            
             self.tkplot.tk.mainloop()
         else:
             super().run()

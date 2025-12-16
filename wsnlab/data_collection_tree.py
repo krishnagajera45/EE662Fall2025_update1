@@ -186,11 +186,28 @@ def copy_simulation_outputs():
         mesh_hop = getattr(config, 'MESH_HOP_N', getattr(config, 'MAX_HOP_DISTANCE', 1)) if config.ENABLE_MESH_ROUTING else 0
         num_failures = getattr(config, 'NUM_NODES_TO_FAIL', 0)
 
+        # Base naming: routing, packet loss, node count, mesh hop, failures
         folder_name = f"results_{routing_strategy}_PL{packet_loss}_N{node_count}"
         if config.ENABLE_MESH_ROUTING:
             folder_name += f"_H{mesh_hop}"
         if num_failures > 0:
             folder_name += f"_F{num_failures}"
+
+        # For energy / traffic-load experiments (Fig. 4 style), append energy and traffic
+        # so multiple runs with different BATTERY_CAPACITY or DATA_PACKET_INTERVAL
+        # do NOT overwrite each other.
+        battery_capacity = getattr(config, 'BATTERY_CAPACITY', None)
+        data_interval = getattr(config, 'DATA_PACKET_INTERVAL', None)
+        try:
+            if battery_capacity is not None:
+                folder_name += f"_E{int(battery_capacity)}mAh"
+        except Exception:
+            pass
+        try:
+            if data_interval is not None:
+                folder_name += f"_TI{int(data_interval)}s"
+        except Exception:
+            pass
 
         results_dir = Path(folder_name)
         results_dir.mkdir(exist_ok=True)
@@ -236,6 +253,11 @@ def copy_simulation_outputs():
             shutil.copytree(snapshot_folder, dst_snapshot)
             copied_count += 1
 
+        # Calculate initial energy from battery configuration
+        battery_capacity = getattr(config, 'BATTERY_CAPACITY', 2000)
+        battery_voltage = getattr(config, 'BATTERY_VOLTAGE', 3.0)
+        initial_energy = battery_voltage * battery_capacity * 3600 / 1000  # Joules
+        
         metadata = {
             "routing_strategy": routing_strategy,
             "packet_loss_rate": packet_loss,
@@ -245,6 +267,10 @@ def copy_simulation_outputs():
             "mesh_hop_n": mesh_hop if config.ENABLE_MESH_ROUTING else None,
             "num_nodes_to_fail": getattr(config, 'NUM_NODES_TO_FAIL', 0),
             "simulation_duration": getattr(config, 'SIM_DURATION', 5000),
+            "initial_energy": initial_energy,  # Add initial energy to metadata
+            "battery_capacity": battery_capacity,  # Add battery capacity
+            "battery_voltage": battery_voltage,  # Add battery voltage
+            "data_packet_interval": getattr(config, 'DATA_PACKET_INTERVAL', 10),  # Add traffic load
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -941,6 +967,10 @@ class SensorNode(wsn.Node):
                 self.draw_tx_range()
                 self.set_timer('TIMER_EXPORT_CH_CSV', config.EXPORT_CH_CSV_INTERVAL)
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
+                # Periodic snapshots for energy experiments (to track connectivity over time)
+                if config.ENABLE_NETWORK_SNAPSHOTS and getattr(config, 'SNAPSHOT_PERIODIC_ENABLED', False):
+                    interval = getattr(config, 'SNAPSHOT_PERIODIC_INTERVAL', 100)
+                    self.set_timer('TIMER_PERIODIC_SNAPSHOT', interval)
                 if config.ENABLE_ENERGY_MODEL:
                     self.set_timer('TIMER_POWER_LOG', 100.0)
             elif new_role == Roles.ROUTER:
@@ -2752,6 +2782,11 @@ class SensorNode(wsn.Node):
             if self.role == Roles.ROOT:
                 write_neighbor_distances_csv("neighbor_distances.csv")
                 self.set_timer('TIMER_EXPORT_NEIGHBOR_CSV', config.EXPORT_NEIGHBOR_CSV_INTERVAL)
+        elif name == 'TIMER_PERIODIC_SNAPSHOT':
+            if self.role == Roles.ROOT and config.ENABLE_NETWORK_SNAPSHOTS:
+                take_network_snapshot(f"Periodic_{self.now:.0f}s", self.now)
+                interval = getattr(config, 'SNAPSHOT_PERIODIC_INTERVAL', 100)
+                self.set_timer('TIMER_PERIODIC_SNAPSHOT', interval)
         elif name == 'TIMER_POWER_LOG':
             if config.ENABLE_ENERGY_MODEL and hasattr(self, 'energy_remaining'):
                 log_power_level(self.id, self.now, self.energy_remaining)

@@ -2317,7 +2317,7 @@ def plot_fig2_avg_join_time_vs_network_size():
 
 
 def plot_fig3_nodes_killed_vs_disconnected():
-    """Fig. 3: Nodes killed versus number of nodes disconnected."""
+    """Fig. 3: Nodes killed versus number of nodes disconnected (CT vs MT comparison)."""
     print("  Generating Fig. 3: Nodes killed vs nodes disconnected...")
     
     folders = find_results_folders()
@@ -2325,17 +2325,22 @@ def plot_fig3_nodes_killed_vs_disconnected():
         print("    Warning: Need simulation runs with node failures")
         return
     
-    nodes_killed = []
-    nodes_disconnected = []
+    # Separate CT and MT data
+    ct_killed = []
+    ct_disconnected = []
+    mt_killed = []
+    mt_disconnected = []
     
     for folder_path, metadata in folders:
         folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
         results = load_results_from_folder(folder)
-        
-        # Count killed nodes from recovery events or metadata
-        killed_count = metadata.get('num_nodes_to_fail', 0)
-        if killed_count == 0 and 'recoveries' in results:
-            killed_count = len(results['recoveries'])
+        routing_strategy = metadata.get('routing_strategy', 'CT')
+
+        # Only trust scenarios that have explicit num_nodes_to_fail in metadata
+        killed_count = metadata.get('num_nodes_to_fail')
+        if killed_count is None or killed_count <= 0:
+            # Skip runs where failure count is ambiguous (e.g., missing metadata)
+            continue
         
         # Count disconnected nodes from orphan events
         disconnected_count = 0
@@ -2347,86 +2352,263 @@ def plot_fig3_nodes_killed_vs_disconnected():
             disconnected_count = len(orphaned_nodes)
         
         if killed_count > 0:
-            nodes_killed.append(killed_count)
-            nodes_disconnected.append(disconnected_count)
+            if routing_strategy == 'CT':
+                ct_killed.append(killed_count)
+                ct_disconnected.append(disconnected_count)
+                print(f"    CT - Killed: {killed_count}, Disconnected: {disconnected_count}")
+            else:  # MT
+                mt_killed.append(killed_count)
+                mt_disconnected.append(disconnected_count)
+                print(f"    MT - Killed: {killed_count}, Disconnected: {disconnected_count}")
     
-    if not nodes_killed:
+    if not ct_killed and not mt_killed:
         print("    Warning: No node failure data found")
         return
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    if len(nodes_killed) == 1:
-        # Single point - use scatter with annotation
-        ax.scatter(nodes_killed, nodes_disconnected, s=200, alpha=0.7, color='red', zorder=3)
-        ax.axvline(nodes_killed[0], color='red', linestyle='--', alpha=0.3, linewidth=1)
-        ax.axhline(nodes_disconnected[0], color='red', linestyle='--', alpha=0.3, linewidth=1)
-        
-        # Add annotation
-        ax.annotate(f'Killed: {nodes_killed[0]}\nDisconnected: {nodes_disconnected[0]}',
-                   xy=(nodes_killed[0], nodes_disconnected[0]), 
-                   xytext=(10, 10), textcoords='offset points',
-                   bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                   arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
-        
-        # Add note
-        ax.text(0.5, 0.95, 'Note: Only one failure scenario available.\nRun simulations with different NUM_NODES_TO_FAIL values\n(e.g., 2, 5, 10, 20) to generate a trend line.',
-               transform=ax.transAxes, fontsize=10, verticalalignment='top',
-               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-               ha='center')
-        
-        # Set reasonable axis limits
-        ax.set_xlim(max(0, nodes_killed[0] - 2), nodes_killed[0] + 2)
-        ax.set_ylim(max(0, nodes_disconnected[0] - 2), nodes_disconnected[0] + 2)
-    else:
-        # Multiple points - use scatter with trend line
-        ax.scatter(nodes_killed, nodes_disconnected, s=100, alpha=0.6, color='red', zorder=3)
-        # Add trend line
-        z = np.polyfit(nodes_killed, nodes_disconnected, 1)
-        p = np.poly1d(z)
-        x_trend = np.linspace(min(nodes_killed), max(nodes_killed), 100)
-        ax.plot(x_trend, p(x_trend), '--', alpha=0.5, color='gray', linewidth=2, 
-               label=f'Trend: y={z[0]:.2f}x+{z[1]:.2f}')
-        ax.legend()
-    
+    has_data = False
+
+    # Plot CT data
+    if ct_killed:
+        if len(ct_killed) > 1:
+            ax.scatter(ct_killed, ct_disconnected, s=100, alpha=0.6, color='blue',
+                       zorder=3, label='CT (Tree Only)', marker='o')
+            # Add trend line
+            z = np.polyfit(ct_killed, ct_disconnected, 1)
+            p = np.poly1d(z)
+            x_trend = np.linspace(min(ct_killed), max(ct_killed), 100)
+            ax.plot(x_trend, p(x_trend), '--', alpha=0.5, color='blue', linewidth=2,
+                    label=f'CT Trend: y={z[0]:.2f}x+{z[1]:.2f}')
+        else:
+            ax.scatter(ct_killed, ct_disconnected, s=200, alpha=0.7, color='blue',
+                       zorder=3, label='CT (Tree Only)', marker='o')
+        has_data = True
+
+    # Plot MT data
+    if mt_killed:
+        if len(mt_killed) > 1:
+            ax.scatter(mt_killed, mt_disconnected, s=100, alpha=0.6, color='red',
+                       zorder=3, label='MT (Mesh+Tree)', marker='s')
+            # Add trend line
+            z = np.polyfit(mt_killed, mt_disconnected, 1)
+            p = np.poly1d(z)
+            x_trend = np.linspace(min(mt_killed), max(mt_killed), 100)
+            ax.plot(x_trend, p(x_trend), '--', alpha=0.5, color='red', linewidth=2,
+                    label=f'MT Trend: y={z[0]:.2f}x+{z[1]:.2f}')
+        else:
+            ax.scatter(mt_killed, mt_disconnected, s=200, alpha=0.7, color='red',
+                       zorder=3, label='MT (Mesh+Tree)', marker='s')
+        has_data = True
+
+    if not has_data:
+        ax.text(0.5, 0.5, 'No data available', ha='center', va='center', fontsize=12)
+
+    # Add note if only a few points
+    total_points = len(ct_killed) + len(mt_killed)
+    if total_points <= 3:
+        ax.text(0.5, 0.95, 'Note: Limited failure scenarios available.\nRun simulations with different NUM_NODES_TO_FAIL values\n(e.g., 2, 5, 10, 20) to generate a proper trend line.',
+                transform=ax.transAxes, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                ha='center')
+
     ax.set_xlabel('Number of Nodes Killed', fontsize=12)
     ax.set_ylabel('Number of Nodes Disconnected', fontsize=12)
-    ax.set_title('Fig. 3: Nodes Killed versus Number of Nodes Disconnected', fontsize=14, fontweight='bold')
+    ax.set_title('Fig. 3: Nodes Killed versus Number of Nodes Disconnected\n(CT vs MT Comparison)', fontsize=14, fontweight='bold')
+    ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig("fig3_nodes_killed_vs_disconnected.png", dpi=300, bbox_inches='tight')
     plt.close()
     print("    ✓ Saved: fig3_nodes_killed_vs_disconnected.png")
-    if len(nodes_killed) == 1:
-        print(f"    ⚠️  Only one failure scenario ({nodes_killed[0]} nodes killed) found.")
-        print("    To generate a trend line, run simulations with different NUM_NODES_TO_FAIL values (e.g., 2, 5, 10, 20)")
+    
+    # Show summary
+    if ct_killed and mt_killed:
+        print(f"    CT data points: {len(ct_killed)} failure scenarios")
+        print(f"    MT data points: {len(mt_killed)} failure scenarios")
+    elif ct_killed:
+        print(f"    ⚠️  Only CT data available ({len(ct_killed)} failure scenarios)")
+        print("    Run MT simulations with different failure counts to compare")
+    elif mt_killed:
+        print(f"    ⚠️  Only MT data available ({len(mt_killed)} failure scenarios)")
+        print("    Run CT simulations with different failure counts to compare")
+    
+    if total_points <= 3:
+        print(f"    ⚠️  Only {total_points} data point(s) found.")
+        print("    To generate a proper trend line, run simulations with different NUM_NODES_TO_FAIL values (e.g., 2, 5, 10, 20)")
 
+
+def plot_fig3b_nodes_killed_vs_disconnected_bar():
+    """Fig. 3 (alt): Line graph (CT vs MT) for nodes killed vs disconnected."""
+    print("  Generating Fig. 3 (alt): Line graph CT vs MT...")
+
+    folders = find_results_folders()
+    if len(folders) == 0:
+        print("    Warning: Need simulation runs with node failures")
+        return
+
+    # Map failure_count -> {'CT': [disconnected], 'MT': [disconnected]}
+    data = defaultdict(lambda: {'CT': [], 'MT': []})
+
+    for folder_path, metadata in folders:
+        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
+        results = load_results_from_folder(folder)
+        routing_strategy = metadata.get('routing_strategy', 'CT')
+
+        # How many were scheduled to fail (only use explicit metadata)
+        killed_count = metadata.get('num_nodes_to_fail')
+        if killed_count is None or killed_count <= 0:
+            continue
+
+        # How many became orphaned/disconnected
+        disconnected_count = 0
+        if 'orphans' in results:
+            orphaned_nodes = set()
+            for orphan in results['orphans']:
+                orphaned_nodes.add(orphan['node_id'])
+            disconnected_count = len(orphaned_nodes)
+
+        if killed_count > 0:
+            data[killed_count][routing_strategy].append(disconnected_count)
+            print(f"    {routing_strategy} - Killed: {killed_count}, Disconnected: {disconnected_count}")
+
+    if not data:
+        print("    Warning: No node failure data found")
+        return
+
+    # Aggregate averages per failure count per strategy
+    # Skip 20-node failure scenario (user requested)
+    failure_counts = sorted(fc for fc in data.keys() if fc != 20)
+    ct_vals = []
+    mt_vals = []
+    for fc in failure_counts:
+        ct_list = data[fc]['CT']
+        mt_list = data[fc]['MT']
+        ct_vals.append(statistics.mean(ct_list) if ct_list else 0)
+        mt_vals.append(statistics.mean(mt_list) if mt_list else 0)
+
+    # Build line graph
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    # Plot CT and MT lines with markers
+    if any(v > 0 for v in ct_vals):
+        ax.plot(failure_counts, ct_vals, 'o-', linewidth=2, markersize=8,
+                label='CT (Tree Only)', color='steelblue')
+    if any(v > 0 for v in mt_vals):
+        ax.plot(failure_counts, mt_vals, 's--', linewidth=2, markersize=8,
+                label='MT (Mesh+Tree)', color='tomato')
+
+    # Annotate each point with absolute and % disconnected
+    for fc, ct_v, mt_v in zip(failure_counts, ct_vals, mt_vals):
+        if ct_v is not None and ct_v > 0:
+            ax.annotate(f"{ct_v:.0f}\n{ct_v/fc*100:.1f}%",
+                        xy=(fc, ct_v),
+                        xytext=(0, 6),
+                        textcoords="offset points",
+                        ha='center', va='bottom',
+                        fontsize=9, color='steelblue')
+        if mt_v is not None and mt_v > 0:
+            ax.annotate(f"{mt_v:.0f}\n{mt_v/fc*100:.1f}%",
+                        xy=(fc, mt_v),
+                        xytext=(0, -18),
+                        textcoords="offset points",
+                        ha='center', va='top',
+                        fontsize=9, color='tomato')
+
+    ax.set_xlabel('Number of Nodes Killed', fontsize=12)
+    ax.set_ylabel('Number of Nodes Disconnected', fontsize=12)
+    ax.set_title('Fig. 3 (alt): Nodes Killed vs Disconnected\nCT vs MT (Line Graph with % Orphaned)', fontsize=14, fontweight='bold')
+    ax.set_xticks(failure_counts)
+    ax.set_xticklabels([str(fc) for fc in failure_counts])
+    ax.legend()
+    ax.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("fig3b_nodes_killed_vs_disconnected_bar.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print("    ✓ Saved: fig3b_nodes_killed_vs_disconnected_bar.png")
 
 def plot_fig4_network_lifetime_vs_initial_energy():
     """Fig. 4: Network lifetime vs initial energy for different traffic loads."""
     print("  Generating Fig. 4: Network lifetime vs initial energy...")
     
-    folders = find_results_folders()
+    all_folders = find_results_folders()
+    # Filter to only include Fig. 4 experiment folders (those with energy and traffic interval in name)
+    # Format: results_MT_PL0_N100_H3_E{capacity}mAh_TI{interval}s
+    folders = []
+    for folder_path, metadata in all_folders:
+        folder_name = Path(folder_path).name if not isinstance(folder_path, Path) else folder_path.name
+        # Check if folder name contains energy (EmAh) and traffic interval (TIs) markers
+        if '_E' in folder_name and '_TI' in folder_name:
+            folders.append((folder_path, metadata))
+        # Also include if metadata has initial_energy and data_packet_interval (newer format)
+        elif metadata.get('initial_energy') is not None and metadata.get('data_packet_interval') is not None:
+            folders.append((folder_path, metadata))
+    
     if len(folders) == 0:
         print("    Warning: Need simulation runs with different energy budgets")
+        print(f"    Found {len(all_folders)} total result folders, but none match Fig. 4 format")
+        print("    Fig. 4 folders should contain '_E' and '_TI' in name, or have initial_energy in metadata")
         return
     
-    # Initial energy from config (BATTERY_ENERGY_TOTAL = 21600 J)
-    INITIAL_ENERGY = 21600.0  # Joules from config
-    
     # Group by traffic load
-    low_traffic_data = []
+    low_traffic_data = []  # [(initial_energy, network_lifetime), ...]
     high_traffic_data = []
     
     for folder_path, metadata in folders:
         folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
         results = load_results_from_folder(folder)
         
-        # Determine traffic load (use packet loss as proxy, or data interval)
-        packet_loss = metadata.get('packet_loss_rate', 0)
-        # For now, classify by packet loss rate (low < 0.001, high >= 0.001)
-        is_low_traffic = packet_loss < 0.001
+        # Get initial energy from metadata or calculate from battery capacity
+        # Check if metadata has initial_energy, otherwise calculate from BATTERY_CAPACITY
+        initial_energy = metadata.get('initial_energy')
+        if initial_energy is None:
+            # Try to get from config file in results folder
+            config_file = folder / "config.py"
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r') as f:
+                        config_content = f.read()
+                        # Extract BATTERY_CAPACITY and BATTERY_VOLTAGE
+                        battery_capacity_match = re.search(r'BATTERY_CAPACITY\s*=\s*(\d+)', config_content)
+                        battery_voltage_match = re.search(r'BATTERY_VOLTAGE\s*=\s*([\d.]+)', config_content)
+                        if battery_capacity_match and battery_voltage_match:
+                            battery_capacity = float(battery_capacity_match.group(1))
+                            battery_voltage = float(battery_voltage_match.group(1))
+                            initial_energy = battery_voltage * battery_capacity * 3600 / 1000  # Joules
+                except Exception:
+                    pass
+        
+        # If still None, use default
+        if initial_energy is None:
+            initial_energy = 21600.0  # Default: 3.0V * 2000mAh * 3600/1000
+        
+        # Round energy to nearest 100 J to avoid floating point precision issues
+        # that could cause same energy levels to be treated as different
+        initial_energy = round(initial_energy / 100) * 100
+        
+        # Determine traffic load from DATA_PACKET_INTERVAL in metadata or config
+        data_interval = metadata.get('data_packet_interval')
+        if data_interval is None:
+            # Try to get from config file
+            config_file = folder / "config.py"
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r') as f:
+                        config_content = f.read()
+                        interval_match = re.search(r'DATA_PACKET_INTERVAL\s*=\s*(\d+)', config_content)
+                        if interval_match:
+                            data_interval = float(interval_match.group(1))
+                except Exception:
+                    pass
+        
+        # Classify traffic: Low = interval >= 30s, High = interval < 30s
+        if data_interval is None:
+            # Fallback: use packet loss as proxy
+            packet_loss = metadata.get('packet_loss_rate', 0)
+            is_low_traffic = packet_loss < 0.001
+        else:
+            is_low_traffic = data_interval >= 30  # Low traffic = less frequent packets
         
         # Calculate network lifetime from snapshots (time until <80% connected)
         network_lifetime = None
@@ -2457,71 +2639,192 @@ def plot_fig4_network_lifetime_vs_initial_energy():
                 network_lifetime = max(snapshot_times)
         
         # Fallback: use energy data if snapshots not available
-        if network_lifetime is None and 'energy' in results and results['energy']:
-            times = sorted(results['energy'].keys())
-            total_nodes = None
-            for t in times:
-                energies = results['energy'][t]
-                if total_nodes is None:
-                    total_nodes = len(energies)
-                
-                if total_nodes and total_nodes > 0:
-                    alive_count = sum(1 for e in energies if e > 0)
-                    connected_ratio = alive_count / total_nodes
-                    if connected_ratio < 0.8:
-                        network_lifetime = t
-                        break
-            
-            # If never dropped below 80%, use last time
-            if network_lifetime is None and times:
-                network_lifetime = max(times)
-        
-        # Use simulation duration from metadata if still None
+        # Check when nodes actually die (energy depletion), accounting for nodes not yet logged
         if network_lifetime is None:
-            network_lifetime = metadata.get('simulation_duration', 5000)
+            total_nodes_expected = metadata.get('node_count', 100)
+            
+            if 'energy' in results and results['energy'] and 'energy_by_node' in results:
+                # Use detailed per-node energy history instead of aggregated windows
+                energy_by_node = results['energy_by_node']
+                
+                # Find the latest time any node logged energy (simulation end time)
+                all_times = []
+                for node_history in energy_by_node.values():
+                    if node_history:
+                        all_times.extend([t for t, _ in node_history])
+                
+                if all_times:
+                    simulation_end = max(all_times)
+                    
+                    # Check connectivity at different time points
+                    # Start checking after network formation AND after all nodes should have logged energy
+                    # Nodes log every 100s, so start checking at 1000s to ensure all nodes have logged
+                    check_times = list(range(1000, int(simulation_end) + 1, 100))
+                    if simulation_end not in check_times:
+                        check_times.append(int(simulation_end))
+                    
+                    initial_energy_val = initial_energy if initial_energy else 21600
+                    energy_threshold = initial_energy_val * 0.01  # 1% threshold
+                    
+                    for check_time in check_times:
+                        alive_count = 0
+                        nodes_with_data = 0
+                        
+                        for node_id, node_history in energy_by_node.items():
+                            if node_history:
+                                nodes_with_data += 1
+                                # Get latest energy reading at or before check_time
+                                relevant = [(t, e) for t, e in node_history if t <= check_time]
+                                if relevant:
+                                    latest_time, latest_energy = max(relevant, key=lambda x: x[0])
+                                    time_since_last_log = check_time - latest_time
+                                    
+                                    # Node is alive if:
+                                    # 1. Has energy above threshold at last log, AND
+                                    # 2. Either logged recently (< 500s ago) OR energy was high enough to last
+                                    #    (if energy was high at last log, assume it lasts until next log cycle)
+                                    if latest_energy > energy_threshold:
+                                        # If logged recently, definitely alive
+                                        # If logged longer ago but had high energy, assume still alive
+                                        # (energy depletion is gradual, not instant)
+                                        if time_since_last_log < 500 or latest_energy > initial_energy_val * 0.5:
+                                            alive_count += 1
+                        
+                        # Only check connectivity if we have data for most nodes (at least 90%)
+                        # This avoids false positives when nodes haven't logged yet
+                        if nodes_with_data >= total_nodes_expected * 0.9:
+                            connected_ratio = alive_count / total_nodes_expected if total_nodes_expected > 0 else 1.0
+                            
+                            if connected_ratio < 0.8:
+                                network_lifetime = check_time
+                                break
+                        else:
+                            # Not enough data yet, skip this time point
+                            continue
+                    
+                    # If never dropped below 80%, use simulation end time
+                    if network_lifetime is None:
+                        network_lifetime = simulation_end
+                else:
+                    # No energy data - use simulation duration
+                    network_lifetime = metadata.get('simulation_duration', 5000)
+            elif 'energy' in results and results['energy']:
+                # Fallback to aggregated energy windows (less accurate)
+                times = sorted(results['energy'].keys())
+                # Skip early windows, start from 500s
+                times_to_check = [t for t in times if t >= 500]
+                
+                if times_to_check:
+                    initial_energy_val = initial_energy if initial_energy else 21600
+                    energy_threshold = initial_energy_val * 0.01
+                    
+                    for t in times_to_check:
+                        energies = results['energy'][t]
+                        # Only count if we have data for most nodes (at least 80%)
+                        if len(energies) >= total_nodes_expected * 0.8:
+                            alive_count = sum(1 for e in energies if e > energy_threshold)
+                            connected_ratio = alive_count / total_nodes_expected
+                            
+                            if connected_ratio < 0.8:
+                                network_lifetime = t
+                                break
+                    
+                    if network_lifetime is None and times:
+                        network_lifetime = max(times)
+                else:
+                    network_lifetime = metadata.get('simulation_duration', 5000)
+            else:
+                # No energy data - use simulation duration as fallback
+                network_lifetime = metadata.get('simulation_duration', 5000)
         
         if network_lifetime is not None:
             if is_low_traffic:
-                low_traffic_data.append((INITIAL_ENERGY, network_lifetime))
+                low_traffic_data.append((initial_energy, network_lifetime))
+                print(f"    Low traffic: E₀={initial_energy:.0f}J, Lifetime={network_lifetime:.0f}s (from {folder.name})")
             else:
-                high_traffic_data.append((INITIAL_ENERGY, network_lifetime))
+                high_traffic_data.append((initial_energy, network_lifetime))
+                print(f"    High traffic: E₀={initial_energy:.0f}J, Lifetime={network_lifetime:.0f}s (from {folder.name})")
     
-    fig, ax = plt.subplots(figsize=(12, 8))
+    if not low_traffic_data and not high_traffic_data:
+        print("    Warning: No data found for Fig. 4")
+        return
     
-    # For now, we only have one initial energy value, so plot points
-    # In real experiments, you'd vary initial energy
+    # Debug: Print raw data before averaging
+    print(f"\n    Raw data summary:")
+    print(f"      Low traffic points: {len(low_traffic_data)}")
+    print(f"      High traffic points: {len(high_traffic_data)}")
+    
+    fig, ax = plt.subplots(figsize=(10, 7))
+    
+    # Process and plot Low traffic data (open circles ○)
     if low_traffic_data:
-        energies, lifetimes = zip(*low_traffic_data)
-        if len(set(energies)) > 1:
-            # Multiple energy values - plot line
-            energy_dict = defaultdict(list)
-            for e, l in low_traffic_data:
-                energy_dict[e].append(l)
-            energies = sorted(energy_dict.keys())
-            lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
-            ax.plot(energies, lifetimes, 'o-', linewidth=2, markersize=10, label='Low traffic', color='blue')
-        else:
-            # Single point
-            ax.scatter(energies[0], lifetimes[0], s=200, marker='o', label='Low traffic', color='blue', alpha=0.7)
+        energy_dict = defaultdict(list)
+        for e, l in low_traffic_data:
+            energy_dict[e].append(l)
+        energies = sorted(energy_dict.keys())
+        lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
+        
+        # Debug: Print grouped data
+        print(f"    Low traffic grouped: {len(energies)} unique energy levels")
+        for e, l in zip(energies, lifetimes):
+            count = len(energy_dict[e])
+            print(f"      E₀={e:.0f}J: Lifetime={l:.0f}s (avg of {count} run(s))")
+        # Open circles with solid line (○-) - matching reference style
+        ax.plot(energies, lifetimes, 'o-', linewidth=2, markersize=8, 
+                markerfacecolor='none', markeredgewidth=2, markeredgecolor='blue',
+                color='blue', label='Low traffic')
     
+    # Process and plot High traffic data (solid squares ■)
     if high_traffic_data:
-        energies, lifetimes = zip(*high_traffic_data)
-        if len(set(energies)) > 1:
-            energy_dict = defaultdict(list)
-            for e, l in high_traffic_data:
-                energy_dict[e].append(l)
-            energies = sorted(energy_dict.keys())
-            lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
-            ax.plot(energies, lifetimes, 's-', linewidth=2, markersize=10, label='High traffic', color='red')
-        else:
-            ax.scatter(energies[0], lifetimes[0], s=200, marker='s', label='High traffic', color='red', alpha=0.7)
+        energy_dict = defaultdict(list)
+        for e, l in high_traffic_data:
+            energy_dict[e].append(l)
+        energies = sorted(energy_dict.keys())
+        lifetimes = [statistics.mean(energy_dict[e]) for e in energies]
+        
+        # Debug: Print grouped data
+        print(f"    High traffic grouped: {len(energies)} unique energy levels")
+        for e, l in zip(energies, lifetimes):
+            count = len(energy_dict[e])
+            print(f"      E₀={e:.0f}J: Lifetime={l:.0f}s (avg of {count} run(s))")
+        # Solid squares with solid line (■-) - matching reference style
+        ax.plot(energies, lifetimes, 's-', linewidth=2, markersize=8,
+                markerfacecolor='red', markeredgecolor='red',
+                color='red', label='High traffic')
     
-    ax.set_xlabel('Initial Energy E₀ [J]', fontsize=12)
-    ax.set_ylabel('Network Lifetime [s]', fontsize=12)
-    ax.set_title('Fig. 4: Network Lifetime vs Initial Energy Budget\n(Network lifetime = time until <80% nodes connected)', 
-                 fontsize=14, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Set axis labels and formatting to match reference
+    ax.set_xlabel('Initial energy E₀ [J]', fontsize=12)
+    ax.set_ylabel('Network lifetime [s]', fontsize=12)
+    ax.set_title('Fig. 4: Network lifetime as a function of the initial energy\nbudget E₀ per node, for different traffic loads.', 
+                 fontsize=13, fontweight='bold', pad=10)
+    
+    # Add grid for easier reading
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Set legend
+    ax.legend(loc='best', fontsize=11, framealpha=0.9)
+    
+    # Auto-scale axes to fit data nicely
+    if low_traffic_data or high_traffic_data:
+        all_energies = []
+        all_lifetimes = []
+        if low_traffic_data:
+            for e, l in low_traffic_data:
+                all_energies.append(e)
+                all_lifetimes.append(l)
+        if high_traffic_data:
+            for e, l in high_traffic_data:
+                all_energies.append(e)
+                all_lifetimes.append(l)
+        
+        if all_energies and all_lifetimes:
+            # Add some padding
+            energy_range = max(all_energies) - min(all_energies)
+            lifetime_range = max(all_lifetimes) - min(all_lifetimes)
+            ax.set_xlim(max(0, min(all_energies) - energy_range * 0.05), 
+                       max(all_energies) + energy_range * 0.05)
+            ax.set_ylim(max(0, min(all_lifetimes) - lifetime_range * 0.05),
+                       max(all_lifetimes) + lifetime_range * 0.1)
     
     plt.tight_layout()
     plt.savefig("fig4_network_lifetime_vs_initial_energy.png", dpi=300, bbox_inches='tight')
@@ -3239,6 +3542,7 @@ def main():
         # Note: Fig. 1 (Network Architecture) is a diagram to be created manually
         ("Fig. 2: Average Join Time vs Network Size", plot_fig2_avg_join_time_vs_network_size),
         ("Fig. 3: Nodes Killed vs Disconnected", plot_fig3_nodes_killed_vs_disconnected),
+        ("Fig. 3 (alt): Bar Chart CT vs MT", plot_fig3b_nodes_killed_vs_disconnected_bar),
         ("Fig. 4: Network Lifetime vs Initial Energy", plot_fig4_network_lifetime_vs_initial_energy),
         ("Fig. 5: Packets Sent vs Delivered", plot_fig5_packets_sent_vs_delivered),
         ("Fig. 6: CT+Mesh vs CT Only", plot_fig6_ct_mesh_vs_ct_only),

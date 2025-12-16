@@ -1,3 +1,0 @@
-node_id,failure_time,recovery_time,downtime,orphan_count_at_recovery,role_before_failure,role_after_recovery
-15,200.000000,331.566605,131.566605,2,REGISTERED,UNDISCOVERED
-85,345.000000,362.761970,17.761970,2,REGISTERED,UNDISCOVERED

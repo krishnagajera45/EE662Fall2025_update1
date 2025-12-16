@@ -29,7 +29,7 @@ SIM_DURATION = 5000  # simulation Duration in seconds
 SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
-SIM_VISUALIZATION = True  # visualization active
+SIM_VISUALIZATION = False  # visualization active
 SCALE = 0.8  # scale factor for visualization
 SIM_SEED = 50 # Random seed for reproducible simulations
 SIM_BACKGROUND_COLOR = 'white'  # Background color for simulation window: 'white', 'lightgray', '#F0F0F0', etc.
@@ -66,12 +66,12 @@ PACKET_LOSS_RATE = 0     # 0.0–1.0 fraction of packets randomly dropped
 ENABLE_PACKET_LOSS_DEBUG = True
 
 ## network recovery properties
-ENABLE_NODE_FAILURE_RECOVERY = True  # Enable random node failures for testing recovery
+ENABLE_NODE_FAILURE_RECOVERY = False  # Enable random node failures for testing recovery
 NODE_FAILURE_START_TIME = 200  # T1: When to start introducing failures (simulation time)
 NODE_FAILURE_INTERVAL = 100  # Time between random node failures
 NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers (T2-T3 period)
 NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers (T3)
-NUM_NODES_TO_FAIL = 2  # Number of random nodes to fail during simulation
+NUM_NODES_TO_FAIL = 10  # Number of random nodes to fail during simulation
 ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
 
 ## visual highlight properties (for easy snapshot comparison)
@@ -79,7 +79,7 @@ FAILURE_HIGHLIGHT_DURATION = 10  # How long to keep failed nodes RED (seconds) -
 ORPHAN_HIGHLIGHT_DURATION = 10  # How long to keep orphaned nodes ORANGE (seconds) - makes T1-T2 snapshots obvious
 
 ## network snapshot properties (for recovery algorithm testing - class notes methodology)
-ENABLE_NETWORK_SNAPSHOTS = True  # Enable network state snapshots (CSV + PNG)
+ENABLE_NETWORK_SNAPSHOTS = False  # Enable network state snapshots (CSV + PNG)
 SNAPSHOT_FOLDER = "snapshots"  # Folder name to store all snapshot PNG files
 CAPTURE_SIMULATION_WINDOW = True  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
 SNAPSHOT_BEFORE_T1 = True  # Take snapshot before T1 (baseline network state)
@@ -91,6 +91,9 @@ SNAPSHOT_AT_T3_AFTER_RECOVERY = True  # Take snapshot at T3 (after recovery)
 SNAPSHOT_AFTER_T3_INTERVAL = 50  # Interval for snapshots after T3 (seconds)
 SNAPSHOT_AFTER_T3_COUNT = 3  # Number of snapshots to take after T3
 SNAPSHOT_FINAL_STATE = True  # Take final snapshot at simulation end
+# Periodic snapshots for energy experiments (to track connectivity over time)
+SNAPSHOT_PERIODIC_ENABLED = False  # Enable periodic snapshots (for energy experiments)
+SNAPSHOT_PERIODIC_INTERVAL = 100  # Interval between periodic snapshots (seconds) - for tracking connectivity over time
 
 ## router / CH transfer properties (for overlap reduction)
 ENABLE_CH_TRANSFER = True  # Enable CH role transfer to reduce cluster overlap
