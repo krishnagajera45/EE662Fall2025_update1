@@ -255,6 +255,10 @@ def copy_simulation_outputs():
             "cluster_members.csv",
             "node_distances.csv",
             "node_distance_matrix.csv",
+            # Power analysis CSV files (friend's style)
+            "averagePower_by_time.csv",
+            "NodePower_levels.csv",
+            "nodePower_over_time.csv",
             LOG_FILE_NAME if LOG_FILE_NAME else None,
             "wsnlab/source/config.py",
         ]
@@ -280,7 +284,7 @@ def copy_simulation_outputs():
         # Calculate initial energy from battery configuration
         battery_capacity = getattr(config, 'BATTERY_CAPACITY', 2000)
         battery_voltage = getattr(config, 'BATTERY_VOLTAGE', 3.0)
-        initial_energy = battery_voltage * battery_capacity * 3600 / 1000  # Joules
+        initial_energy = battery_voltage * battery_capacity * 3600  # Joules
         
         metadata = {
             "routing_strategy": routing_strategy,
@@ -3163,6 +3167,107 @@ def write_cluster_members_csv(path="cluster_members.csv"):
     log_to_console_and_file(f"Exported cluster members table to {path}")
 
 
+def generate_power_analysis_csvs():
+    """Generate power analysis CSV files similar to friend's approach."""
+    try:
+        from collections import defaultdict
+        
+        input_file = "node_power_levels_over_time.csv"
+        if not Path(input_file).exists():
+            log_to_console_and_file("⚠️  No power data found for analysis")
+            return
+        
+        log_to_console_and_file("📊 Generating power analysis CSV files...")
+        
+        # Read and aggregate power data
+        power_by_time = defaultdict(list)
+        node_latest_power = {}
+        node_data = []
+        node_initial_power = {}
+        
+        with open(input_file, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    node_id = int(row["node_id"])
+                    power = float(row["power"])
+                    time = float(row["time"])
+                    
+                    # For time-based aggregation
+                    t_int = int(time)
+                    if power <= 90000:  # Filter invalid values
+                        power_by_time[t_int].append(power)
+                    
+                    # For latest power levels
+                    if node_id not in node_latest_power or time > node_latest_power[node_id]["time"]:
+                        node_latest_power[node_id] = {"power": power, "time": time}
+                    
+                    # For detailed progression
+                    if node_id not in node_initial_power:
+                        node_initial_power[node_id] = power
+                    node_data.append((node_id, time, power))
+                    
+                except (ValueError, KeyError):
+                    continue
+        
+        if not power_by_time:
+            log_to_console_and_file("⚠️  No valid power data found")
+            return
+        
+        # 1. averagePower_by_time.csv
+        times = sorted(power_by_time.keys())
+        with open("averagePower_by_time.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["time", "avg_power", "min_power", "max_power", "num_nodes"])
+            writer.writeheader()
+            for t in times:
+                values = power_by_time[t]
+                if values:
+                    writer.writerow({
+                        "time": t,
+                        "avg_power": sum(values) / len(values),
+                        "min_power": min(values),
+                        "max_power": max(values),
+                        "num_nodes": len(values)
+                    })
+        
+        # 2. NodePower_levels.csv
+        with open("NodePower_levels.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["node_id", "current_power", "last_update_time"])
+            writer.writeheader()
+            for node_id in sorted(node_latest_power.keys()):
+                data = node_latest_power[node_id]
+                writer.writerow({
+                    "node_id": node_id,
+                    "current_power": data["power"],
+                    "last_update_time": data["time"]
+                })
+        
+        # 3. nodePower_over_time.csv
+        node_data.sort(key=lambda x: (x[0], x[1]))  # Sort by node_id, then time
+        with open("nodePower_over_time.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["node_id", "time", "power", "power_consumed", "power_percentage"])
+            writer.writeheader()
+            for node_id, time, power in node_data:
+                initial = node_initial_power[node_id]
+                consumed = initial - power
+                percentage = (power / initial * 100) if initial > 0 else 0
+                writer.writerow({
+                    "node_id": node_id,
+                    "time": time,
+                    "power": power,
+                    "power_consumed": consumed,
+                    "power_percentage": percentage
+                })
+        
+        log_to_console_and_file("✓ Power analysis CSV files generated:")
+        log_to_console_and_file("  - averagePower_by_time.csv (time-based averages)")
+        log_to_console_and_file("  - NodePower_levels.csv (current node power levels)")
+        log_to_console_and_file("  - nodePower_over_time.csv (detailed power progression)")
+        
+    except Exception as e:
+        log_to_console_and_file(f"⚠️  Error generating power analysis: {e}")
+
+
 def create_network(node_class, number_of_nodes=100):
     edge = math.ceil(math.sqrt(number_of_nodes))
     for i in range(number_of_nodes):
@@ -3235,6 +3340,10 @@ calculate_and_log_average_packet_delay()
 if config.ENABLE_NODE_FAILURE_RECOVERY:
     calculate_and_log_recovery_statistics()
 log_packet_loss_statistics()
+
+# Generate power analysis CSV files (friend's style)
+if config.ENABLE_ENERGY_MODEL:
+    generate_power_analysis_csvs()
 
 copy_simulation_outputs()
 

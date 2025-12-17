@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Script to run Fig. 4 experiment: Network Lifetime vs Initial Energy Budget.
+Script to run Fig. 5 experiment: Packets Delivered vs Packets Sent.
+Measures network lifetime (time until <80% nodes connected to sink)
+for different packet loss rates.
+
 Runs simulations with:
+- Different packet loss rates (0, 0.001, 0.0001)
 - Different initial energy budgets (varying BATTERY_CAPACITY)
 - Different traffic loads (varying DATA_PACKET_INTERVAL)
-- Both CT and MT routing strategies
 
-Generates Fig. 4 plot automatically after all runs complete.
+Generates Fig. 5 plot automatically after all runs complete.
 """
 
 import subprocess
@@ -85,26 +88,17 @@ class ConfigModifier:
         return True
 
 
-def run_simulation(energy_level, data_interval, routing_config, run_num, total_runs):
+def run_simulation(packet_loss, battery_capacity, data_interval, run_num, total_runs):
     """Run a single simulation."""
-    # Determine routing strategy label
-    if routing_config['mesh'] and routing_config['tree']:
-        strategy = "MT"  # Mesh+Tree
-    elif routing_config['mesh']:
-        strategy = "M"   # Mesh-only
-    else:
-        strategy = "CT"  # Tree-only
     
-    mesh_hop = "H3" if routing_config['mesh'] else ""
+    # Calculate initial energy
+    battery_voltage = 3.0
+    initial_energy = battery_voltage * battery_capacity * 3600 / 1000  # Joules
     
-    # Initial energy is just the JOULES value
-    initial_energy = energy_level
-    
-    traffic_label = "Low" if data_interval >= 2 else "High"
-    routing_label = routing_config['label']
+    traffic_label = "Low" if data_interval >= 30 else ("Medium" if data_interval >= 15 else "High")
     
     print(f"\n{'='*70}")
-    print(f"Run {run_num}/{total_runs}: E₀={initial_energy:.1f}J, Traffic={traffic_label} ({data_interval}s), Routing={routing_label}")
+    print(f"Run {run_num}/{total_runs}: PktLoss={packet_loss}, E₀={initial_energy:.0f}J ({battery_capacity}mAh), Traffic={traffic_label} ({data_interval}s)")
     print(f"{'='*70}")
     
     try:
@@ -112,7 +106,7 @@ def run_simulation(energy_level, data_interval, routing_config, run_num, total_r
             [sys.executable, SIMULATION_SCRIPT],
             capture_output=True,
             text=True,
-            timeout=7200,  # 2 hour timeout (energy experiments may take longer)
+            timeout=7200,  # 2 hour timeout
             env={**os.environ, 'PYTHONUNBUFFERED': '1'}
         )
         
@@ -141,7 +135,7 @@ def generate_plots():
     
     try:
         result = subprocess.run(
-            [sys.executable, PLOT_SCRIPT],
+            [sys.executable, PLOT_SCRIPT, "--fig5"],
             capture_output=True,
             text=True,
             timeout=300
@@ -154,7 +148,7 @@ def generate_plots():
             return False
         
         print(f"  ✓ Plots generated successfully")
-        plot_files = list(Path('.').glob('fig4*.png'))
+        plot_files = list(Path('.').glob('fig5*.png'))
         if plot_files:
             print(f"  Generated: {plot_files[0].name}")
         return True
@@ -167,96 +161,78 @@ def generate_plots():
 def main():
     """Main function."""
     print("="*70)
-    print("FIG. 4 EXPERIMENT: Network Lifetime vs Initial Energy Budget")
+    print("FIG. 5 EXPERIMENT: Packets Delivered vs Packets Sent")
     print("="*70)
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
     print("\nThis will run simulations with:")
-    print("  - Initial Energy (E₀): 0.05, 0.10, 0.15, 0.20, 0.25 Joules (BALANCED)")
-    print("    (50-250 millijoules - allows network formation)")
+    print("  - Packet Loss Rates: 0, 0.001, 0.0001")
+    print("  - Initial Energy (E₀): 500, 2000 mAh")
+    print("    (corresponds to: 5400, 21600 Joules)")
     print("  - Traffic Loads:")
-    print("    - Low traffic: DATA_PACKET_INTERVAL = 0.5s (2 packets/sec)")
-    print("    - High traffic: DATA_PACKET_INTERVAL = 0.1s (10 packets/sec)")
-    print("  - Simulation Duration: 3000s (shorter window)")
-    print("  - Routing: Mesh+Tree AND Mesh-only (comparison)")
-    print("  - Total: ~20 simulations (5 energy × 2 traffic × 2 routing)")
-    print("\nNetwork lifetime = calculated from node_power_levels_over_time.csv")
-    print("(No snapshots - saves storage!)")
-    print("After all simulations, Fig. 4 plot will be generated automatically.")
-    print("\n⚠️  BALANCED CONFIGURATION: Sufficient for network formation + differentiation")
-    print("   Expected lifetimes: 500-2500s with clear curves.")
+    print("    - Low traffic: DATA_PACKET_INTERVAL = 60s")
+    print("    - High traffic: DATA_PACKET_INTERVAL = 10s")
+    print("  - Routing: Mesh+Tree (hybrid)")
+    print("  - Baseline Current: 100 mA (for faster energy depletion)")
+    print("  - Total: 12 simulations (3 packet loss × 2 energy × 2 traffic)")
+    print("\nNetwork lifetime = time until <80% nodes remain connected to sink")
+    print("After all simulations, Fig. 5 plot will be generated automatically.")
     print("="*70)
     
-    # Auto-continue for automated runs
-    # response = input("\nContinue? (y/n): ").strip().lower()
-    # if response != 'y':
-    #     print("Cancelled.")
-    #     return
-    print("\nStarting experiment...")
+    # Check if running in interactive mode
+    import sys
+    if sys.stdin.isatty():
+        response = input("\nContinue? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Cancelled.")
+            return
+    else:
+        print("\nAuto-starting (non-interactive mode)...")
     
     config_mod = ConfigModifier(CONFIG_FILE)
     config_mod.backup()
     
-    # Set base configuration
-    config_mod.set_value("SIM_NODE_COUNT", "100")  # Use 100 nodes
-    config_mod.set_value("ENABLE_ENERGY_MODEL", "True")  # Enable energy model
-    config_mod.set_value("ENABLE_NODE_FAILURE_RECOVERY", "False")  # No failures for energy experiments
-
-    # ✅ FIX 1: Disable snapshots (saves storage), use energy CSV instead
-    # We'll calculate network lifetime from node_power_levels_over_time.csv
-    config_mod.set_value("ENABLE_NETWORK_SNAPSHOTS", "False")
-    config_mod.set_value("SNAPSHOT_PERIODIC_ENABLED", "False")
-
-    # ✅ SHORTER SIMULATION: 3000s instead of 5000s to show differentiation
-    config_mod.set_value("SIM_DURATION", "3000")
-
-    # Turn off visualization for faster runs
-    config_mod.set_value("SIM_VISUALIZATION", "False")
-    
-    # ✅ FIX 2: Use BALANCED energy budgets (not too high, not too low)
-    # BALANCED: 50-250 millijoules (0.05-0.25J)
-    # Allows network formation while showing differentiation
-    E0_J = [0.05, 0.10, 0.15, 0.20, 0.25]  # Target energies in Joules (BALANCED)
-    energy_levels = E0_J  # Use Joules directly
-    
-    # ✅ FIX 3: Use AGGRESSIVE traffic to burn through tiny energy budgets
-    # Need to deplete 0.02-0.10 J within 3000s simulation window
-    data_intervals = {
-        'Low': 0.5,    # Low traffic: send every 0.5 seconds (2 packets/sec)
-        'High': 0.1    # High traffic: send every 0.1 seconds (10 packets/sec)
-    }
-    
-    # Run both Mesh+Tree and Mesh-only routing for comparison
-    routing_configs = [
-        {'mesh': True, 'tree': True, 'label': 'Mesh+Tree'},
-        {'mesh': True, 'tree': False, 'label': 'Mesh-only'}
-    ]
-    
-    total_runs = len(energy_levels) * len(data_intervals) * len(routing_configs)
-    run_num = 0
-    successful = 0
-    start_time = time.time()
-    
     try:
-        for energy_level in energy_levels:
-            # Convert Joules to mAh for BATTERY_CAPACITY
-            # E[J] = V * Ah * 3600, so Ah = E / (V * 3600)
-            # mAh = E * 1000 / (V * 3600) = E / 10.8 @ 3.0V
-            battery_capacity_mah = energy_level / 10.8
-            config_mod.set_value("BATTERY_CAPACITY", f"{battery_capacity_mah:.6f}")
+        # Set base configuration
+        config_mod.set_value("SIM_NODE_COUNT", "100")
+        config_mod.set_value("ENABLE_ENERGY_MODEL", "True")
+        config_mod.set_value("ENABLE_NODE_FAILURE_RECOVERY", "False")
+        config_mod.set_value("NUM_NODES_TO_FAIL", "0")  # Explicitly set to 0 for Fig 5
+        config_mod.set_value("ENABLE_NETWORK_SNAPSHOTS", "False")
+        config_mod.set_value("SNAPSHOT_PERIODIC_ENABLED", "True")  # Enable periodic tracking for connectivity
+        config_mod.set_value("SNAPSHOT_PERIODIC_INTERVAL", "100")  # Check every 100 seconds
+        config_mod.set_value("SIM_VISUALIZATION", "False")
+        config_mod.set_value("ENABLE_MESH_ROUTING", "True")  # Always use Mesh+Tree
+        
+        # Packet loss rates
+        packet_loss_rates = [0, 0.001, 0.0001]
+        
+        # Energy budgets (mAh) - 2 levels for 12 total simulations
+        battery_capacities = [500, 2000]
+        
+        # Traffic loads
+        data_intervals = {
+            'Low': 60,   # Send every 60 seconds
+            'High': 10   # Send every 10 seconds
+        }
+        
+        total_runs = len(packet_loss_rates) * len(battery_capacities) * len(data_intervals)
+        run_num = 0
+        successful = 0
+        start_time = time.time()
+        
+        for packet_loss in packet_loss_rates:
+            config_mod.set_value("PACKET_LOSS_RATE", str(packet_loss))
             
-            for traffic_label, data_interval in data_intervals.items():
-                config_mod.set_value("DATA_PACKET_INTERVAL", str(data_interval))
+            for battery_capacity in battery_capacities:
+                config_mod.set_value("BATTERY_CAPACITY", str(battery_capacity))
                 
-                for routing_config in routing_configs:
+                for traffic_label, data_interval in data_intervals.items():
                     run_num += 1
-                    
-                    # Update routing configuration
-                    config_mod.set_value("ENABLE_MESH_ROUTING", str(routing_config['mesh']))
-                    config_mod.set_value("ENABLE_TREE_ROUTING", str(routing_config['tree']))
+                    config_mod.set_value("DATA_PACKET_INTERVAL", str(data_interval))
                     
                     # Run simulation
-                    if run_simulation(energy_level, data_interval, routing_config, run_num, total_runs):
+                    if run_simulation(packet_loss, battery_capacity, data_interval, run_num, total_runs):
                         successful += 1
                     
                     # Small delay between runs
@@ -277,7 +253,7 @@ def main():
         print(f"Total time: {elapsed/60:.1f} minutes ({elapsed/3600:.2f} hours)")
         print(f"Successful runs: {successful}/{total_runs}")
         print(f"Plot generated: {'Yes' if plot_success else 'No'}")
-        print(f"\nCheck fig4_network_lifetime_vs_initial_energy.png for results!")
+        print(f"\nCheck fig5_packets_delivered_vs_sent.png for results!")
         print(f"{'='*70}")
         
     except KeyboardInterrupt:

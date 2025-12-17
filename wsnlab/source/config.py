@@ -1,3 +1,4 @@
+
 import math
 
 ## network properties
@@ -25,7 +26,7 @@ NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER
 ## simulation properties
 SIM_NODE_COUNT = 100  # node count in simulation
 SIM_NODE_PLACING_CELL_SIZE = 95  # increased spacing to reduce overlap (was 75)
-SIM_DURATION = 5000  # simulation Duration in seconds
+SIM_DURATION = 5000  # Shorter for testing  # simulation Duration in seconds
 SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
@@ -55,11 +56,11 @@ ENABLE_MESH_ROUTING = True   # Enable mesh routing (try mesh first, then tree)
 ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh fails)
 # Note: If ENABLE_MESH_ROUTING = False, only tree routing will be used
 #       If ENABLE_TREE_ROUTING = False, only mesh routing will be used (may fail if no mesh route)
-ENABLE_PACKET_VISUALIZATION = False  # Visualize data packets as they travel through network
+ENABLE_PACKET_VISUALIZATION = True  # Visualize data packets as they travel through network
 PACKET_TRACE_DURATION = 10.0  # How long to keep packet trace lines visible (seconds)
 
 ## data traffic properties
-DATA_PACKET_INTERVAL = 10  # seconds between random data injections per node
+DATA_PACKET_INTERVAL = 1.0  # seconds between random data injections per node
 
 ## channel model / packet loss
 PACKET_LOSS_RATE = 0     # 0.0–1.0 fraction of packets randomly dropped
@@ -71,7 +72,7 @@ NODE_FAILURE_START_TIME = 200  # T1: When to start introducing failures (simulat
 NODE_FAILURE_INTERVAL = 100  # Time between random node failures
 NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers (T2-T3 period)
 NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers (T3)
-NUM_NODES_TO_FAIL = 10  # Number of random nodes to fail during simulation
+NUM_NODES_TO_FAIL = 0  # Number of random nodes to fail during simulation
 ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
 
 ## visual highlight properties (for easy snapshot comparison)
@@ -81,19 +82,16 @@ ORPHAN_HIGHLIGHT_DURATION = 10  # How long to keep orphaned nodes ORANGE (second
 ## network snapshot properties (for recovery algorithm testing - class notes methodology)
 ENABLE_NETWORK_SNAPSHOTS = False  # Enable network state snapshots (CSV + PNG)
 SNAPSHOT_FOLDER = "snapshots"  # Folder name to store all snapshot PNG files
-CAPTURE_SIMULATION_WINDOW = True  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
-SNAPSHOT_BEFORE_T1 = True  # Take snapshot before T1 (baseline network state)
-SNAPSHOT_AT_T1 = True  # Take snapshot at T1 (when failures occur)
-SNAPSHOT_T1_T2_AFTER_FAILURE = True  # Take snapshot between T1-T2 (after failure, show orphans)
+CAPTURE_SIMULATION_WINDOW = False  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
+SNAPSHOT_BEFORE_T1 = False  # Take snapshot before T1 (baseline network state)
+SNAPSHOT_AT_T1 = False  # Take snapshot at T1 (when failures occur)
+SNAPSHOT_T1_T2_AFTER_FAILURE = False  # Take snapshot between T1-T2 (after failure, show orphans)
 SNAPSHOT_T1_T2_DELAY = 5  # Delay after T1 to take T1-T2 snapshot (seconds)
-SNAPSHOT_T2_T3_RECOVERY = True  # Take snapshot during T2-T3 (recovery in progress)
-SNAPSHOT_AT_T3_AFTER_RECOVERY = True  # Take snapshot at T3 (after recovery)
+SNAPSHOT_T2_T3_RECOVERY = False  # Take snapshot during T2-T3 (recovery in progress)
+SNAPSHOT_AT_T3_AFTER_RECOVERY = False  # Take snapshot at T3 (after recovery)
 SNAPSHOT_AFTER_T3_INTERVAL = 50  # Interval for snapshots after T3 (seconds)
 SNAPSHOT_AFTER_T3_COUNT = 3  # Number of snapshots to take after T3
-SNAPSHOT_FINAL_STATE = True  # Take final snapshot at simulation end
-# Periodic snapshots for energy experiments (to track connectivity over time)
-SNAPSHOT_PERIODIC_ENABLED = False  # Enable periodic snapshots (for energy experiments)
-SNAPSHOT_PERIODIC_INTERVAL = 100  # Interval between periodic snapshots (seconds) - for tracking connectivity over time
+SNAPSHOT_FINAL_STATE = False  # Take final snapshot at simulation end
 
 ## router / CH transfer properties (for overlap reduction)
 ENABLE_CH_TRANSFER = True  # Enable CH role transfer to reduce cluster overlap
@@ -134,12 +132,12 @@ CC2420_RX_CURRENT = 18.8  # mA (receive current)
 
 # Battery Configuration (Two AA Alkaline Batteries)
 BATTERY_VOLTAGE = 3.0  # Volts
-BATTERY_CAPACITY = 2000  # mAh
-BATTERY_ENERGY_TOTAL = BATTERY_VOLTAGE * BATTERY_CAPACITY * 3600 / 1000  # Joules (3.0V * 2.0Ah * 3600s/h)
+BATTERY_CAPACITY = 0.004630  # Ah (50J energy budget)
+BATTERY_ENERGY_TOTAL = BATTERY_VOLTAGE * BATTERY_CAPACITY * 3600  # Joules (3.0V * 2.0Ah * 3600s/h)
 BATTERY_ENERGY_MIN = BATTERY_ENERGY_TOTAL * 0.01  # Minimum energy threshold (1% of total) - node shuts down below this
 
 # Baseline Current (when node is idle/sleeping)
-BASELINE_CURRENT = 0.0001  # Amperes (100 µA) - baseline power consumption when not transmitting/receiving
+BASELINE_CURRENT = 0.0001  # Amperes (0.1 mA) - realistic baseline power consumption
 
 # Cluster Optimization
 ENABLE_CLUSTER_OPTIMIZATION = True  # Enable cluster optimization protocol
