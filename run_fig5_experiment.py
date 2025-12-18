@@ -182,10 +182,10 @@ def main():
     # Check if running in interactive mode
     import sys
     if sys.stdin.isatty():
-        response = input("\nContinue? (y/n): ").strip().lower()
-        if response != 'y':
-            print("Cancelled.")
-            return
+    response = input("\nContinue? (y/n): ").strip().lower()
+    if response != 'y':
+        print("Cancelled.")
+        return
     else:
         print("\nAuto-starting (non-interactive mode)...")
     

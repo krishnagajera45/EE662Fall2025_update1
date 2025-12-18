@@ -24,13 +24,13 @@ NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER
 
 
 ## simulation properties
-SIM_NODE_COUNT = 100  # node count in simulation
+SIM_NODE_COUNT = 100
 SIM_NODE_PLACING_CELL_SIZE = 95  # increased spacing to reduce overlap (was 75)
-SIM_DURATION = 5000  # Shorter for testing  # simulation Duration in seconds
+SIM_DURATION = 3000  # Fig 5
 SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
 SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
 SIM_TITLE = 'Data Collection Tree'  # title of visualization window
-SIM_VISUALIZATION = False  # visualization active
+SIM_VISUALIZATION = False  # Faster simulation
 SCALE = 0.8  # scale factor for visualization
 SIM_SEED = 50 # Random seed for reproducible simulations
 SIM_BACKGROUND_COLOR = 'white'  # Background color for simulation window: 'white', 'lightgray', '#F0F0F0', etc.
@@ -44,26 +44,26 @@ EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # simulation time units;
 
 ## neighbor discovery properties
 ENABLE_MULTIHOP_DISCOVERY = True  # Enable multi-hop neighbor discovery
-MAX_HOP_DISTANCE = 3  # Maximum hop distance to track neighbors
+MAX_HOP_DISTANCE = 3
 NEIGHBOR_SHARE_INTERVAL = 30  # How often to share neighbor info (simulation time)
 ENABLE_NEIGHBOR_DEBUG = True  # Toggle for neighbor discovery debug logs
 
 ## routing & debug toggles
 ENABLE_LOG_FILE = True  # Write simulation events to a timestamped log
 ENABLE_ROUTING_DEBUG = True  # Mesh/tree routing debug statements
-ENABLE_CLUSTER_DEBUG = True  # Cluster/member table debug statements
-ENABLE_MESH_ROUTING = True   # Enable mesh routing (try mesh first, then tree)
-ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh fails)
+ENABLE_CLUSTER_DEBUG = True
+ENABLE_MESH_ROUTING = True
+ENABLE_TREE_ROUTING = True
 # Note: If ENABLE_MESH_ROUTING = False, only tree routing will be used
 #       If ENABLE_TREE_ROUTING = False, only mesh routing will be used (may fail if no mesh route)
 ENABLE_PACKET_VISUALIZATION = True  # Visualize data packets as they travel through network
 PACKET_TRACE_DURATION = 10.0  # How long to keep packet trace lines visible (seconds)
 
 ## data traffic properties
-DATA_PACKET_INTERVAL = 1.0  # seconds between random data injections per node
+DATA_PACKET_INTERVAL = 5  # Fig 5
 
 ## channel model / packet loss
-PACKET_LOSS_RATE = 0     # 0.0–1.0 fraction of packets randomly dropped
+PACKET_LOSS_RATE = 0.0001  # Fig 5
 ENABLE_PACKET_LOSS_DEBUG = True
 
 ## network recovery properties
@@ -72,7 +72,7 @@ NODE_FAILURE_START_TIME = 200  # T1: When to start introducing failures (simulat
 NODE_FAILURE_INTERVAL = 100  # Time between random node failures
 NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers (T2-T3 period)
 NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers (T3)
-NUM_NODES_TO_FAIL = 0  # Number of random nodes to fail during simulation
+NUM_NODES_TO_FAIL = 0  # No failures for Fig 5
 ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
 
 ## visual highlight properties (for easy snapshot comparison)
@@ -80,7 +80,7 @@ FAILURE_HIGHLIGHT_DURATION = 10  # How long to keep failed nodes RED (seconds) -
 ORPHAN_HIGHLIGHT_DURATION = 10  # How long to keep orphaned nodes ORANGE (seconds) - makes T1-T2 snapshots obvious
 
 ## network snapshot properties (for recovery algorithm testing - class notes methodology)
-ENABLE_NETWORK_SNAPSHOTS = False  # Enable network state snapshots (CSV + PNG)
+ENABLE_NETWORK_SNAPSHOTS = False
 SNAPSHOT_FOLDER = "snapshots"  # Folder name to store all snapshot PNG files
 CAPTURE_SIMULATION_WINDOW = False  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
 SNAPSHOT_BEFORE_T1 = False  # Take snapshot before T1 (baseline network state)
@@ -103,8 +103,8 @@ PROACTIVE_CH_TIMER = 60  # Time (seconds) after registration before isolated REG
 UNREGISTERED_CH_TRIGGER_THRESHOLD = 3  # Number of failed join attempts before UNREGISTERED node triggers CH creation (reduced spam)
 
 ## energy model properties (CC2420 radio)
-ENABLE_ENERGY_MODEL = True  # Enable energy consumption tracking and node shutdown
-ENABLE_ENERGY_DEBUG = True  # Debug logs for energy consumption
+ENABLE_ENERGY_MODEL = True
+ENABLE_ENERGY_DEBUG = True
 
 # CC2420 Radio Specifications
 CC2420_DATA_RATE = 250000  # bits per second (250 kbps)
@@ -132,12 +132,12 @@ CC2420_RX_CURRENT = 18.8  # mA (receive current)
 
 # Battery Configuration (Two AA Alkaline Batteries)
 BATTERY_VOLTAGE = 3.0  # Volts
-BATTERY_CAPACITY = 0.004630  # Ah (50J energy budget)
-BATTERY_ENERGY_TOTAL = BATTERY_VOLTAGE * BATTERY_CAPACITY * 3600  # Joules (3.0V * 2.0Ah * 3600s/h)
+BATTERY_CAPACITY = 0.013889  # Ah (50J energy budget)
+BATTERY_ENERGY_TOTAL = 15.0  # Fig 5: High energy to reach lifetime
 BATTERY_ENERGY_MIN = BATTERY_ENERGY_TOTAL * 0.01  # Minimum energy threshold (1% of total) - node shuts down below this
 
 # Baseline Current (when node is idle/sleeping)
-BASELINE_CURRENT = 0.0001  # Amperes (0.1 mA) - realistic baseline power consumption
+BASELINE_CURRENT = 0.0003  # Fig 5: Low baseline
 
 # Cluster Optimization
 ENABLE_CLUSTER_OPTIMIZATION = True  # Enable cluster optimization protocol

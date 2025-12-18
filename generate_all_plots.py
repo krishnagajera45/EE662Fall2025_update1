@@ -2833,8 +2833,16 @@ def plot_fig4_network_lifetime_vs_initial_energy():
 
 
 def plot_fig5_packets_sent_vs_delivered():
-    """Fig. 5: Packets sent vs packets delivered for different packet loss rates.
-    Shows network lifetime (when connectivity drops below 80%)."""
+    """
+    Fig. 5: Packets sent vs packets delivered for different packet loss rates.
+    
+    Shows network lifetime data points where each point represents
+    the total packets sent/delivered when network lifetime is reached (<80% connectivity).
+    
+    Groups results by:
+    - Packet loss rate (creates separate lines)
+    - Traffic interval (creates points along each line - more packets = longer runtime)
+    """
     print("  Generating Fig. 5: Packets sent vs delivered...")
     
     folders = find_results_folders()
@@ -2844,8 +2852,8 @@ def plot_fig5_packets_sent_vs_delivered():
     
     fig, ax = plt.subplots(figsize=(10, 7))
     
-    # Group data by packet loss rate
-    # pl_data[packet_loss] = [(sent, delivered), ...]
+    # Group data by packet loss rate, then sort by traffic interval
+    # pl_data[packet_loss] = [(packets_sent, packets_delivered, traffic_interval), ...]
     pl_data = defaultdict(list)
     
     for folder_path, metadata in folders:
@@ -2858,6 +2866,7 @@ def plot_fig5_packets_sent_vs_delivered():
             continue
         
         packet_loss = metadata.get('packet_loss_rate', 0)
+        traffic_interval = metadata.get('data_packet_interval', 10)
         
         try:
             with open(connectivity_file, 'r') as f:
@@ -2887,8 +2896,8 @@ def plot_fig5_packets_sent_vs_delivered():
                     packets_delivered = int(lifetime_row.get('packets_delivered', 0))
                     
                     if packets_sent > 0:
-                        pl_data[packet_loss].append((packets_sent, packets_delivered))
-                        print(f"    PL={packet_loss}: Sent={packets_sent}, Delivered={packets_delivered} (from {folder.name})")
+                        pl_data[packet_loss].append((packets_sent, packets_delivered, traffic_interval))
+                        print(f"    PL={packet_loss}, TI={traffic_interval}s: Sent={packets_sent}, Delivered={packets_delivered}")
         
         except Exception as e:
             print(f"    Error reading {connectivity_file}: {e}")
@@ -2898,85 +2907,54 @@ def plot_fig5_packets_sent_vs_delivered():
         print("    Warning: No connectivity data found")
         return
     
-    # Plot for different packet loss rates with enhanced visualization (using real data)
+    # Plot lines for different packet loss rates
     packet_loss_rates = sorted(pl_data.keys())
-    markers = ['o', 'D', '^']  # Circle, Diamond, Triangle
-    colors = ['#2E86AB', '#A23B72', '#F18F01']  # Blue, Purple, Orange
-
+    markers = ['o', 's', '^', 'D']
+    colors = ['black', 'blue', 'red', 'green']
+    
     for idx, pl_rate in enumerate(packet_loss_rates):
         if len(pl_data[pl_rate]) == 0:
             continue
-
-        # Sort points by packets sent (x-axis)
-        points = sorted(pl_data[pl_rate], key=lambda x: x[0])
-        sent_vals = [s for s, d in points]
-        delivered_vals = [d for s, d in points]
-
+        
+        # Sort by packets_sent to create a proper line
+        data_points = sorted(pl_data[pl_rate], key=lambda x: x[0])
+        
+        sent_vals = [s for s, d, ti in data_points]
+        delivered_vals = [d for s, d, ti in data_points]
+        
         marker = markers[idx % len(markers)]
         color = colors[idx % len(colors)]
-
-        # Format label
-        if pl_rate == 0:
-            label = "Packet Loss = 0"
-        elif pl_rate == 0.001:
-            label = "Packet Loss = 0.001"
-        elif pl_rate == 0.0001:
-            label = "Packet Loss = 0.0001"
-        else:
-            label = f"Packet Loss = {pl_rate}"
-
-        # SCATTER + SMOOTH CURVES - Elegant visualization
-        # First plot the smooth curve
-        if len(sent_vals) >= 2:
-            from scipy.interpolate import make_interp_spline
-            import numpy as np
-            # Create smooth curve using spline interpolation
-            try:
-                x_smooth = np.linspace(min(sent_vals), max(sent_vals), 300)
-                spl = make_interp_spline(sent_vals, delivered_vals, k=min(3, len(sent_vals)-1))
-                y_smooth = spl(x_smooth)
-                ax.plot(x_smooth, y_smooth, color=color, linewidth=3, alpha=0.7, zorder=2)
-            except:
-                # Fallback to straight lines if smooth fails
-                ax.plot(sent_vals, delivered_vals, color=color, linewidth=3, alpha=0.7, zorder=2)
         
-        # Then plot the markers on top
-        ax.scatter(sent_vals, delivered_vals, marker=marker, s=350, 
-                  label=label, color=color, edgecolors='white',
-                  linewidths=3, alpha=1.0, zorder=3)
-    
-    # Determine data range and add reference line
-    if pl_data:
-        all_sent = [s for pl_points in pl_data.values() for s, d in pl_points]
-        all_delivered = [d for pl_points in pl_data.values() for s, d in pl_points]
-        if all_sent and all_delivered:
-            x_min = min(all_sent) - 10000
-            x_max = max(all_sent) + 10000
-            y_min = min(all_delivered) - 10000
-            y_max = max(all_delivered) + 10000
-            
-            # Add reference line for perfect delivery (y=x)
-            ax.plot([x_min, x_max], [x_min, x_max], 'k--', linewidth=2, alpha=0.4, 
-                    label='Perfect Delivery', zorder=1)
-            
-            # Set axis limits
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min, y_max)
+        # Format label to match reference figure
+        if pl_rate == 0:
+            label = "Packet Loss =0"
+        elif pl_rate == 0.001:
+            label = "Packet Loss =0.001"
+        elif pl_rate == 0.0001:
+            label = "Packet Loss =0.0001"
+        else:
+            label = f"Packet Loss ={pl_rate}"
+        
+        # Plot line with markers
+        ax.plot(sent_vals, delivered_vals, marker=marker, linestyle='-',
+               markersize=8, label=label, color=color,
+               markerfacecolor='none' if pl_rate == 0 else color,
+               markeredgewidth=2, linewidth=2)
     
     ax.set_xlabel('Packets Sent [packets]', fontsize=13, fontweight='bold')
     ax.set_ylabel('Packets Delivered [packets]', fontsize=13, fontweight='bold')
-    ax.set_title('Fig. 5: Network lifetime as a function of the initial energy\nbudget E₀ per node, for different traffic loads', 
+    ax.set_title('Fig. 5: Network lifetime as a function of the initial energy\nbudget E₀ per node, for different traffic loads',
                  fontsize=13, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=11, framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
     
-    # Format axis to show values in thousands with 'k' suffix
-    from matplotlib.ticker import FuncFormatter
-    def thousands(x, pos):
-        return f'{int(x/1000)}k'
-    ax.xaxis.set_major_formatter(FuncFormatter(thousands))
-    ax.yaxis.set_major_formatter(FuncFormatter(thousands))
-    
-    ax.legend(loc='lower right', fontsize=11, framealpha=0.95, edgecolor='gray')
-    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+    # Set axis limits
+    if pl_data:
+        all_sent = [s for pl_points in pl_data.values() for s, d, ti in pl_points]
+        all_delivered = [d for pl_points in pl_data.values() for s, d, ti in pl_points]
+        if all_sent and all_delivered:
+            ax.set_xlim(0, max(all_sent) * 1.05)
+            ax.set_ylim(0, max(all_delivered) * 1.05)
     
     plt.tight_layout()
     plt.savefig("fig5_packets_sent_vs_delivered.png", dpi=300, bbox_inches='tight')
@@ -3167,58 +3145,103 @@ def plot_fig7_energy_impact_on_lifetime_metrics():
 
 
 def plot_fig8_pdr_over_time():
-    """Fig. 8: Packet delivery ratio (PDR) over time."""
+    """
+    Fig. 8: Packet delivery ratio (PDR) over time with multiple scenarios.
+    
+    Looks for results_fig8_* folders to show PDR under different conditions.
+    Each folder should contain connectivity_over_time.csv with PDR data.
+    """
     print("  Generating Fig. 8: PDR over time...")
     
-    folders = find_results_folders()
-    if len(folders) == 0:
-        print("    Warning: Need simulation runs with packet data")
-        return
+    # Look for Fig 8 specific results folders
+    fig8_folders = []
+    for folder in Path('.').iterdir():
+        if folder.is_dir() and folder.name.startswith('results_fig8_'):
+            fig8_folders.append(folder)
+    
+    # If no Fig 8 specific folders, use any results folders
+    if not fig8_folders:
+        folders = find_results_folders()
+        if len(folders) == 0:
+            print("    Warning: No result folders found")
+            print("    Run: python3 run_fig8_multi_experiment.py")
+            return
+        fig8_folders = [Path(f[0]) if not isinstance(f[0], Path) else f[0] for f in folders]
     
     fig, ax = plt.subplots(figsize=(12, 8))
     
     has_data = False
     
-    for folder_path, metadata in folders:
-        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
-        results = load_results_from_folder(folder)
+    # Color scheme for scenarios
+    scenario_colors = {
+        'baseline': '#2E86AB',
+        'low_energy': '#C73E1D',
+        'high_traffic': '#F18F01',
+        'packet_loss': '#A23B72',
+    }
+    
+    scenario_markers = {
+        'baseline': 'o',
+        'low_energy': 's',
+        'high_traffic': '^',
+        'packet_loss': 'D',
+    }
+    
+    for folder in sorted(fig8_folders):
+        connectivity_file = folder / "connectivity_over_time.csv"
         
-        if 'packets' not in results or not results['packets']:
+        if not connectivity_file.exists():
+            print(f"    Warning: No connectivity_over_time.csv in {folder}")
             continue
         
-        # Calculate PDR over time windows
-        max_time = max([p.get('created_at', 0) for p in results['packets']], default=5000)
-        time_bins = np.arange(0, max_time + 100, 100)  # 100-second windows
+        # Extract scenario name
+        scenario_name = folder.name.replace('results_fig8_', '').replace('_', ' ').title()
+        scenario_key = folder.name.replace('results_fig8_', '')
+        
+        times = []
         pdr_values = []
         
-        for t_end in time_bins[1:]:
-            t_start = t_end - 100
-            packets_in_window = [p for p in results['packets'] 
-                               if t_start <= p.get('created_at', 0) < t_end]
+        try:
+            with open(connectivity_file, 'r') as f:
+                reader = csv.DictReader(f)
+                
+                for row in reader:
+                    time = float(row['time'])
+                    packets_sent = int(row['packets_sent'])
+                    packets_delivered = int(row['packets_delivered'])
+                    
+                    # Calculate cumulative PDR (total delivered / total sent)
+                    if packets_sent > 0:
+                        pdr = (packets_delivered / packets_sent) * 100
+                        times.append(time)
+                        pdr_values.append(pdr)
             
-            if packets_in_window:
-                delivered = sum(1 for p in packets_in_window if p.get('received_at', 0) > 0)
-                pdr = delivered / len(packets_in_window) if packets_in_window else 0
-                pdr_values.append((t_end, pdr))
+            if times and pdr_values:
+                color = scenario_colors.get(scenario_key, '#333333')
+                marker = scenario_markers.get(scenario_key, 'o')
+                
+                ax.plot(times, pdr_values, linewidth=2.5, label=scenario_name, 
+                       color=color, marker=marker, markersize=5, markevery=5, alpha=0.85)
+                has_data = True
+                
+                avg_pdr = np.mean(pdr_values)
+                print(f"    {scenario_name}: {len(times)} points, avg PDR={avg_pdr:.1f}%")
         
-        if pdr_values:
-            times, pdrs = zip(*pdr_values)
-            strategy = metadata.get('routing_strategy', 'CT')
-            label = f"{strategy} (PL={metadata.get('packet_loss_rate', 0)})"
-            color = 'blue' if strategy == 'CT' else 'red'
-            ax.plot(times, pdrs, linewidth=2, label=label, color=color, alpha=0.7)
-            has_data = True
+        except Exception as e:
+            print(f"    Error loading {folder}: {e}")
+            continue
     
     if not has_data:
-        ax.text(0.5, 0.5, 'No packet data available', ha='center', va='center', fontsize=12)
+        ax.text(0.5, 0.5, 'No data available\nRun: python3 run_fig8_multi_experiment.py', 
+               ha='center', va='center', fontsize=14, color='red')
+    else:
+        ax.legend(fontsize=12, loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
     
-    ax.set_xlabel('Time [s]', fontsize=12)
-    ax.set_ylabel('Packet Delivery Ratio (PDR)', fontsize=12)
-    ax.set_title('Fig. 8: Packet Delivery Ratio (PDR) Over Time', fontsize=14, fontweight='bold')
-    if has_data:
-        ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 1.1)
+    ax.set_xlabel('Time (seconds)', fontsize=13, fontweight='bold')
+    ax.set_ylabel('Packet Delivery Ratio (PDR) [%]', fontsize=13, fontweight='bold')
+    ax.set_title('Fig. 8: Packet Delivery Ratio (PDR) Over Time', fontsize=15, fontweight='bold', pad=20)
+    ax.set_ylim(0, 105)
     
     plt.tight_layout()
     plt.savefig("fig8_pdr_over_time.png", dpi=300, bbox_inches='tight')
@@ -3601,410 +3624,6 @@ def plot_fig11_cdf_node_lifetimes():
     print("    ✓ Saved: nodes_discovered_vs_killed.png")
 
 
-def plot_time_vs_energy_routing_comparison():
-    """Time vs Energy plot comparing CT-only vs M+CT routing strategies with modern styling."""
-    print("  Generating Time vs Energy routing comparison plot...")
-    
-    folders = find_results_folders()
-    if len(folders) < 2:
-        print("    Warning: Need at least 2 simulation runs (CT-only and M+CT)")
-        return
-    
-    # Set modern style
-    plt.style.use('seaborn-v0_8-darkgrid')
-    fig, ax = plt.subplots(figsize=(12, 8))
-    fig.patch.set_facecolor('white')
-    
-    # Modern color palette and styling
-    routing_styles = {
-        'CT': {
-            'color': '#2E86AB',  # Professional blue
-            'marker': 'o', 
-            'linestyle': '-', 
-            'label': 'Collection Tree Only',
-            'linewidth': 3,
-            'markersize': 8,
-            'markerfacecolor': '#2E86AB',
-            'markeredgecolor': 'white',
-            'markeredgewidth': 2
-        },
-        'MT': {
-            'color': '#A23B72',  # Professional magenta
-            'marker': 's', 
-            'linestyle': '-', 
-            'label': 'Mesh + Collection Tree',
-            'linewidth': 3,
-            'markersize': 8,
-            'markerfacecolor': '#A23B72',
-            'markeredgecolor': 'white',
-            'markeredgewidth': 2
-        }
-    }
-    
-    has_data = False
-    strategy_folders = {}  # Track best folder for each strategy
-    
-    # First pass: find the best folder for each strategy (prefer matching energy configs)
-    for folder_path, metadata in folders:
-        strategy = metadata.get('routing_strategy', 'CT')
-        battery_capacity = metadata.get('battery_capacity', 2.0)
-        data_interval = metadata.get('data_packet_interval', 1.0)
-        
-        # Prefer folders with standard config (2.0 Ah, 1.0s interval)
-        if strategy not in strategy_folders:
-            strategy_folders[strategy] = (folder_path, metadata)
-        else:
-            # Replace if this one has more standard config
-            current_battery = strategy_folders[strategy][1].get('battery_capacity', 2.0)
-            current_interval = strategy_folders[strategy][1].get('data_packet_interval', 1.0)
-            
-            if (battery_capacity == 2.0 and data_interval == 1.0 and 
-                (current_battery != 2.0 or current_interval != 1.0)):
-                strategy_folders[strategy] = (folder_path, metadata)
-    
-    # Second pass: plot the selected folders
-    for strategy, (folder_path, metadata) in strategy_folders.items():
-            
-        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
-        energy_file = folder / "node_power_levels_over_time.csv"
-        
-        if not energy_file.exists():
-            print(f"    No energy data in {folder.name}")
-            continue
-        
-        try:
-            time_energy_data = defaultdict(list)
-            
-            with open(energy_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split(',')
-                    if len(parts) == 3:
-                        try:
-                            time_val = float(parts[0])
-                            node_id = int(parts[1])
-                            energy = float(parts[2])
-                            time_energy_data[time_val].append(energy)
-                        except ValueError:
-                            continue
-            
-            if not time_energy_data:
-                continue
-            
-            # Process and sample data
-            times = sorted(time_energy_data.keys())
-            start_time = times[0]
-            sampled_times = []
-            avg_remaining_energies = []
-            
-            sample_interval = max(100, (times[-1] - times[0]) / 60)  # More points for smoother curves
-            
-            last_sampled_time = None
-            for i, time_val in enumerate(times):
-                if i == 0 or (last_sampled_time is not None and time_val - last_sampled_time >= sample_interval) or i == len(times) - 1:
-                    energies = time_energy_data[time_val]
-                    avg_remaining = sum(energies) / len(energies)
-                    normalized_time = (time_val - start_time) / 60  # Convert to minutes
-                    sampled_times.append(normalized_time)
-                    avg_remaining_energies.append(avg_remaining)
-                    last_sampled_time = time_val
-            
-            if sampled_times and avg_remaining_energies:
-                style = routing_styles.get(strategy, routing_styles['CT'])
-                
-                # Plot with enhanced styling
-                line = ax.plot(sampled_times, avg_remaining_energies, 
-                              color=style['color'], 
-                              marker=style['marker'], 
-                              linestyle=style['linestyle'],
-                              linewidth=style['linewidth'], 
-                              markersize=style['markersize'],
-                              markerfacecolor=style['markerfacecolor'],
-                              markeredgecolor=style['markeredgecolor'],
-                              markeredgewidth=style['markeredgewidth'],
-                              label=style['label'],
-                              alpha=0.9,
-                              markevery=max(1, len(sampled_times)//15),  # Show markers at intervals
-                              zorder=3)
-                
-                # Add subtle shadow effect
-                ax.plot(sampled_times, avg_remaining_energies, 
-                       color=style['color'], 
-                       linewidth=style['linewidth'] + 1,
-                       alpha=0.3,
-                       zorder=1)
-                
-                # Strategy already tracked in strategy_folders
-                has_data = True
-                print(f"    ✓ Added {strategy} data: {len(sampled_times)} sampled points")
-        
-        except Exception as e:
-            print(f"    Error processing {folder.name}: {e}")
-            continue
-    
-    if not has_data:
-        print("    ⚠️  Warning: No energy data found.")
-        ax.text(0.5, 0.5, 'No Energy Data Available\n\nRun simulations with energy model enabled', 
-               ha='center', va='center', fontsize=16, 
-               bbox=dict(boxstyle='round,pad=1', facecolor='lightcoral', alpha=0.8))
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-    else:
-        # Enhanced styling
-        ax.set_xlabel('Time (minutes)', fontsize=14, fontweight='bold', color='#2C3E50')
-        ax.set_ylabel('Average Remaining Energy (J)', fontsize=14, fontweight='bold', color='#2C3E50')
-        ax.set_title('Energy Depletion Comparison: Routing Strategies\nWSN Protocol Performance Analysis', 
-                    fontsize=16, fontweight='bold', color='#2C3E50', pad=20)
-        
-        # Enhanced legend
-        legend = ax.legend(loc='upper right', fontsize=12, frameon=True, 
-                          fancybox=True, shadow=True, framealpha=0.9,
-                          edgecolor='#34495E', facecolor='white')
-        legend.get_frame().set_linewidth(2)
-        
-        # Enhanced grid
-        ax.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
-        ax.set_facecolor('#FAFAFA')
-        
-        # Set axis limits with padding
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-        
-        # Add subtle border
-        for spine in ax.spines.values():
-            spine.set_edgecolor('#34495E')
-            spine.set_linewidth(1.5)
-        
-        # Enhance tick labels
-        ax.tick_params(axis='both', which='major', labelsize=11, colors='#2C3E50')
-        
-        # Add annotation for key insights
-        if len(strategy_folders) >= 2:
-            ax.annotate('Energy Efficiency Analysis', 
-                       xy=(0.02, 0.98), xycoords='axes fraction',
-                       fontsize=10, style='italic', color='#7F8C8D',
-                       verticalalignment='top')
-    
-    plt.tight_layout()
-    plt.savefig("time_vs_energy_routing_comparison.png", dpi=300, bbox_inches='tight', 
-                facecolor='white', edgecolor='none')
-    plt.close()
-    print("    ✓ Saved: time_vs_energy_routing_comparison.png")
-
-
-def plot_fig7_energy_impact_on_lifetime_metrics():
-    """Fig. 7: Impact of initial energy budget on different lifetime metrics."""
-    print("  Generating Fig. 7: Energy impact on lifetime metrics...")
-    
-    folders = find_results_folders()
-    if len(folders) == 0:
-        print("    Warning: Need simulation runs with different energy budgets")
-        return
-    
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(12, 8))
-    fig.patch.set_facecolor('white')
-    
-    # Group results by initial energy budget
-    energy_data = defaultdict(list)
-    
-    for folder_path, metadata in folders:
-        folder = Path(folder_path) if not isinstance(folder_path, Path) else folder_path
-        
-        # Get initial energy from metadata
-        initial_energy = metadata.get('initial_energy', 21.6)  # Default 21.6J
-        battery_capacity = metadata.get('battery_capacity', 2.0)  # Ah
-        battery_voltage = metadata.get('battery_voltage', 3.0)   # V
-        
-        # Calculate energy in Joules if needed
-        if initial_energy > 100:  # Likely in Joules already
-            energy_budget = initial_energy
-        else:
-            energy_budget = battery_capacity * battery_voltage * 3600  # Convert Ah to J
-        
-        # Load simulation results
-        results = load_results_from_folder(folder)
-        
-        # Calculate lifetime metrics
-        metrics = calculate_lifetime_metrics(folder, results)
-        if metrics:
-            energy_data[energy_budget].append(metrics)
-    
-    if not energy_data:
-        print("    Warning: No lifetime metrics calculated")
-        return
-    
-    # Prepare data for plotting
-    energy_budgets = sorted(energy_data.keys())
-    first_death_times = []
-    fifty_percent_times = []
-    connectivity_times = []
-    
-    for energy in energy_budgets:
-        metrics_list = energy_data[energy]
-        
-        # Average across multiple runs if available
-        first_deaths = [m['first_node_death'] for m in metrics_list if m['first_node_death'] > 0]
-        fifty_percents = [m['fifty_percent_dead'] for m in metrics_list if m['fifty_percent_dead'] > 0]
-        connectivities = [m['connectivity_drop'] for m in metrics_list if m['connectivity_drop'] > 0]
-        
-        first_death_times.append(np.mean(first_deaths) if first_deaths else 0)
-        fifty_percent_times.append(np.mean(fifty_percents) if fifty_percents else 0)
-        connectivity_times.append(np.mean(connectivities) if connectivities else 0)
-    
-    # Use actual energy budgets for display (10J, 20J, 50J, 100J)
-    display_energies = energy_budgets
-    
-    # Create bar chart
-    x = np.arange(len(display_energies))
-    width = 0.25
-    
-    # Colors matching the reference
-    colors = {
-        'first_death': '#7B68EE',      # Blue-purple
-        'fifty_percent': '#FF6B6B',    # Red-pink  
-        'connectivity': '#D2B48C'      # Brown-tan
-    }
-    
-    bars1 = ax.bar(x - width, first_death_times, width, 
-                   label='First node death', color=colors['first_death'], alpha=0.8)
-    bars2 = ax.bar(x, fifty_percent_times, width,
-                   label='50% nodes dead', color=colors['fifty_percent'], alpha=0.8)
-    bars3 = ax.bar(x + width, connectivity_times, width,
-                   label='< 80% connected', color=colors['connectivity'], alpha=0.8)
-    
-    # Styling to match reference
-    ax.set_xlabel('Initial energy E₀ [J]', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Time [s]', fontsize=14, fontweight='bold')
-    ax.set_title('Fig. 7: Impact of the initial energy budget E₀ on different\nlifetime metrics: time of first node death, time at which 50%\nof the nodes are dead, and time at which fewer than 80%\nof the nodes remain connected to the sink.', 
-                 fontsize=12, fontweight='bold', pad=20)
-    
-    # Set x-axis labels
-    ax.set_xticks(x)
-    ax.set_xticklabels([f'{e:.1f}' for e in display_energies])
-    
-    # Legend with custom positioning
-    ax.legend(loc='upper left', fontsize=11, frameon=True, 
-              fancybox=True, shadow=True, framealpha=0.9)
-    
-    # Grid styling
-    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-    ax.set_axisbelow(True)
-    
-    # Set y-axis to start from 0
-    ax.set_ylim(bottom=0)
-    
-    # Add value labels on bars (optional)
-    def add_value_labels(bars):
-        for bar in bars:
-            height = bar.get_height()
-            if height > 0:
-                ax.text(bar.get_x() + bar.get_width()/2., height + ax.get_ylim()[1]*0.01,
-                       f'{int(height)}', ha='center', va='bottom', fontsize=9)
-    
-    add_value_labels(bars1)
-    add_value_labels(bars2)
-    add_value_labels(bars3)
-    
-    plt.tight_layout()
-    plt.savefig("fig7_energy_impact_on_lifetime_metrics.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    print("    ✓ Saved: fig7_energy_impact_on_lifetime_metrics.png")
-
-
-def calculate_lifetime_metrics(folder, results):
-    """Calculate lifetime metrics for a simulation run."""
-    try:
-        # Read energy data to find node deaths
-        energy_file = folder / "node_power_levels_over_time.csv"
-        if not energy_file.exists():
-            return None
-        
-        # Track node energy over time
-        node_energies = defaultdict(list)
-        time_points = set()
-        
-        with open(energy_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(',')
-                if len(parts) == 3:
-                    try:
-                        time_val = float(parts[0])
-                        node_id = int(parts[1])
-                        energy = float(parts[2])
-                        node_energies[node_id].append((time_val, energy))
-                        time_points.add(time_val)
-                    except ValueError:
-                        continue
-        
-        if not node_energies:
-            return None
-        
-        # Find death times (when energy drops to very low levels)
-        death_times = []
-        for node_id, energy_history in node_energies.items():
-            energy_history.sort()  # Sort by time
-            min_energy = min(e for t, e in energy_history)
-            initial_energy = max(e for t, e in energy_history)
-            
-            # Consider dead if energy drops below 1% of initial energy
-            death_threshold = initial_energy * 0.01
-            
-            for i, (time_val, energy) in enumerate(energy_history):
-                if energy <= death_threshold:
-                    death_times.append(time_val)
-                    break
-        
-        # Calculate metrics
-        metrics = {
-            'first_node_death': min(death_times) if death_times else 0,
-            'fifty_percent_dead': 0,
-            'connectivity_drop': 0
-        }
-        
-        # For demonstration purposes, create estimated metrics based on energy trends
-        # In a real scenario with lower energy budgets, more nodes would actually die
-        
-        total_nodes = len(node_energies)
-        death_times.sort()
-        
-        # Use first node death as baseline and estimate others
-        if death_times:
-            first_death = death_times[0]
-            # Estimate 50% dead time as 1.5x first death time
-            metrics['fifty_percent_dead'] = first_death * 1.5
-            # Estimate connectivity drop as 1.2x first death time  
-            metrics['connectivity_drop'] = first_death * 1.2
-        else:
-            # If no deaths, use energy depletion to estimate
-            # Find nodes with lowest energy percentage
-            energy_percentages = []
-            for node_id, energy_history in node_energies.items():
-                initial_energy = max(e for t, e in energy_history)
-                final_energy = min(e for t, e in energy_history)
-                percentage = final_energy / initial_energy if initial_energy > 0 else 1.0
-                energy_percentages.append(percentage)
-            
-            if energy_percentages:
-                avg_remaining = sum(energy_percentages) / len(energy_percentages)
-                # Estimate based on energy depletion rate
-                simulation_time = 5000
-                estimated_death_time = simulation_time * (1.0 / (1.0 - avg_remaining + 0.1))
-                metrics['fifty_percent_dead'] = min(estimated_death_time * 1.5, simulation_time * 2)
-                metrics['connectivity_drop'] = min(estimated_death_time * 1.2, simulation_time * 1.8)
-        
-        return metrics
-        
-    except Exception as e:
-        print(f"    Error calculating metrics for {folder.name}: {e}")
-        return None
-
-
 # ============================================================================
 # MAIN FUNCTION
 # ============================================================================
@@ -4031,7 +3650,6 @@ def main():
         ("Fig. 9: Avg Remaining Energy Over Time", plot_fig9_avg_remaining_energy_over_time),
         ("Fig. 10: Fraction Connected Nodes Over Time", plot_fig10_fraction_connected_nodes_over_time),
         ("Fig. 11: CDF of Node Lifetimes", plot_fig11_cdf_node_lifetimes),
-        ("Time vs Energy: CT vs M+CT Routing", plot_time_vs_energy_routing_comparison),
     ]
     
     results = {}

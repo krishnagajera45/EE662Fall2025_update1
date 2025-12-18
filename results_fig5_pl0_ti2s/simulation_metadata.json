@@ -1,0 +1,15 @@
+{
+  "routing_strategy": "MT",
+  "packet_loss_rate": 0,
+  "node_count": 100,
+  "mesh_enabled": true,
+  "tree_enabled": true,
+  "mesh_hop_n": 3,
+  "num_nodes_to_fail": 0,
+  "simulation_duration": 3000,
+  "initial_energy": 150.0012,
+  "battery_capacity": 0.013889,
+  "battery_voltage": 3.0,
+  "data_packet_interval": 2,
+  "timestamp": "2025-12-17T23:46:32.252808"
+}
