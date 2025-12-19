@@ -293,7 +293,7 @@ Data Packets
 ~~~~~~~~~~~~
 
 * **SENSOR_DATA**: Data packets from sensor nodes to ROOT
-  * Includes packet ID, source, destination, and route trace
+* Includes packet ID, source, destination, and route trace
   * Processing time: 0.0002 seconds
   * Interval: ``DATA_PACKET_INTERVAL`` (default: 10 seconds)
   * Full path recorded in ``packet_paths.csv``

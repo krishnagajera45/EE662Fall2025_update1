@@ -331,14 +331,14 @@ Step 1: Direct Neighbor Check
 
 Step 2: Multi-Hop Neighbor Check (if ENABLE_MULTIHOP_DISCOVERY is True)
    Checks multihop_neighbor_table for destination:
-   
-   .. code-block:: python
-   
-      multihop_match = next(
-          (info for gui, info in self.multihop_neighbor_table.items()
-           if addr_equals(info.get('addr'), dest)),
-          None
-      )
+
+.. code-block:: python
+
+   multihop_match = next(
+       (info for gui, info in self.multihop_neighbor_table.items() 
+        if addr_equals(info.get('addr'), dest)),
+       None
+   )
    
    If found:
    * Gets next_hop GUI from multihop_match
@@ -351,13 +351,13 @@ Tree Routing (if ENABLE_TREE_ROUTING is True)
 
 Step 3: Cluster Member Check
    If node is CLUSTER_HEAD or ROOT:
-   
-   .. code-block:: python
-   
-      member_match = next(
-          (entry for entry in self.members_table if entry == dest),
-          None
-      )
+
+.. code-block:: python
+
+       member_match = next(
+           (entry for entry in self.members_table if entry == dest),
+           None
+       )
    
    If found:
    * Route label: "CLUSTER_MEMBER"
@@ -366,9 +366,9 @@ Step 3: Cluster Member Check
 
 Step 4: Same Cluster Check
    Checks if destination is in same cluster:
-   
-   .. code-block:: python
-   
+
+.. code-block:: python
+
       if self.ch_addr is not None and hasattr(dest, 'net_addr'):
           if dest.net_addr == self.ch_addr.net_addr:
               pck['next_hop'] = dest
@@ -381,10 +381,10 @@ Step 4: Same Cluster Check
 
 Step 5: Child Network Check
    Checks child_networks_table:
-   
-   .. code-block:: python
-   
-      for child_gui, child_networks in self.child_networks_table.items():
+
+.. code-block:: python
+
+   for child_gui, child_networks in self.child_networks_table.items():
           if hasattr(dest, 'net_addr') and dest.net_addr in child_networks:
               child_info = self.neighbors_table.get(child_gui)
               if child_info:
@@ -397,12 +397,12 @@ Step 5: Child Network Check
 
 Step 6: Parent Fallback
    Routes up tree to parent:
-   
-   .. code-block:: python
-   
-      if self.role != Roles.ROOT and self.parent_gui is not None:
-          parent_info = self.neighbors_table.get(self.parent_gui)
-          if parent_info:
+
+.. code-block:: python
+
+   if self.role != Roles.ROOT and self.parent_gui is not None:
+       parent_info = self.neighbors_table.get(self.parent_gui)
+       if parent_info:
               pck['next_hop'] = parent_info.get('ch_addr') or parent_info.get('addr')
               path_str = "TREE_PARENT"
    
@@ -505,13 +505,13 @@ In ``send()`` method before packet transmission:
        packet_size = estimate_packet_size(pck)
        if self.ch_addr is not None:
            cluster_id = self.ch_addr.net_addr
-           tx_power = get_cluster_tx_power(cluster_id)
+       tx_power = get_cluster_tx_power(cluster_id)
        else:
            tx_power = self.tx_power_dbm
        tx_energy = calculate_tx_energy(packet_size, tx_power, include_pll_overhead=True)
        if self.energy_remaining >= tx_energy:
-           self.energy_remaining -= tx_energy
-           self.energy_tx_total += tx_energy
+       self.energy_remaining -= tx_energy
+       self.energy_tx_total += tx_energy
        else:
            self.energy_remaining = 0.0
            self.shutdown_node("Insufficient energy for transmission")
@@ -527,8 +527,8 @@ In ``on_receive()`` method when packet is received:
        packet_size = estimate_packet_size(pck)
        rx_energy = calculate_rx_energy(packet_size, include_pll_overhead=True)
        if self.energy_remaining >= rx_energy:
-           self.energy_remaining -= rx_energy
-           self.energy_rx_total += rx_energy
+       self.energy_remaining -= rx_energy
+       self.energy_rx_total += rx_energy
        else:
            self.energy_remaining = 0.0
            self.shutdown_node("Insufficient energy for reception")
@@ -541,10 +541,10 @@ In ``TIMER_BASELINE_ENERGY`` handler (every 1.0 second):
 .. code-block:: python
 
    if config.ENABLE_ENERGY_MODEL and not self.is_shutdown:
-       baseline_power = config.CC2420_VOLTAGE * config.BASELINE_CURRENT
-       baseline_energy = baseline_power * 1.0  # For 1 second
+   baseline_power = config.CC2420_VOLTAGE * config.BASELINE_CURRENT
+   baseline_energy = baseline_power * 1.0  # For 1 second
        if self.energy_remaining >= baseline_energy:
-           self.energy_remaining -= baseline_energy
+   self.energy_remaining -= baseline_energy
            self.energy_baseline_total += baseline_energy
            self.check_energy_level()
        else:

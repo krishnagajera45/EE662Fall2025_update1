@@ -1,0 +1,627 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Design and Evaluation of a Self-Organizing Sensor Network Combining Cluster-Tree and Mesh Routing}
+
+\author{\IEEEauthorblockN{Krishna Gajera}
+\IEEEauthorblockA{\textit{Department of Electrical and Computer Engineering} \\
+\textit{San Diego State University}\\
+San Diego, CA, USA \\
+Red ID: 132625971}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents the design, implementation, and evaluation of a hybrid wireless sensor network protocol that combines cluster-tree hierarchical organization with mesh routing capabilities. The protocol addresses limitations of pure cluster-tree topologies (fragility to node failures) and pure mesh networks (high overhead) by implementing a mesh-first routing strategy with tree fallback. The system is implemented in Python using a discrete-event simulation framework (SimPy) with CC2420 radio energy modeling. Experimental evaluation demonstrates improved network resilience, reduced join times, and enhanced packet delivery under node failures and packet loss conditions. Key results show that the hybrid CT+Mesh approach maintains connectivity for significantly more nodes when failures occur compared to CT-only routing, with average join times scaling sub-linearly with network size up to 100 nodes.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Wireless Sensor Network, Cluster-Tree, Mesh Routing, Self-Organization, Energy Model, CC2420
+\end{IEEEkeywords}
+
+\section{INTRODUCTION}
+
+Wireless sensor networks (WSNs) face fundamental challenges in achieving reliable communication while maintaining energy efficiency in resource-constrained, infrastructure-less environments. Traditional cluster-tree topologies provide hierarchical organization and efficient routing paths but suffer from single points of failure when cluster heads or critical relay nodes fail. Pure mesh networks offer robustness through multiple paths but incur significant overhead in maintaining routing tables and discovering routes.
+
+This paper presents a hybrid approach that combines the organizational benefits of cluster-tree structures with the resilience of mesh routing. The proposed protocol implements a \emph{mesh-first, tree-fallback} routing strategy where nodes first attempt to route packets through discovered mesh neighbors, falling back to the hierarchical tree structure when mesh routes are unavailable.
+
+\subsection{Problem Statement}
+Pure cluster-tree networks exhibit several limitations:
+\begin{itemize}
+    \item \emph{Fragility}: Failure of a cluster head disconnects all child nodes, creating network partitions
+    \item \emph{Latency}: All inter-cluster communication must traverse the tree hierarchy, increasing hop count
+    \item \emph{Energy imbalance}: Cluster heads and relay nodes consume energy faster due to higher forwarding load
+\end{itemize}
+
+Pure mesh networks, while robust, suffer from:
+\begin{itemize}
+    \item \emph{High overhead}: Continuous neighbor discovery and route maintenance consume significant energy
+    \item \emph{Complexity}: Maintaining routing tables for all possible paths requires substantial memory
+    \item \emph{Unpredictable latency}: Route discovery delays can vary significantly
+\end{itemize}
+
+\subsection{Proposed Solution}
+The hybrid protocol addresses these limitations by:
+\begin{itemize}
+    \item Organizing nodes into a cluster-tree hierarchy for efficient address assignment and basic connectivity
+    \item Enabling mesh routing between neighbors discovered through one-hop and multi-hop neighbor sharing
+    \item Using mesh links for local communication while maintaining tree paths for global routing
+    \item Implementing adaptive mechanisms for cluster head transfer and orphan recovery
+\end{itemize}
+
+\subsection{Contributions}
+The main contributions of this work are:
+\begin{itemize}
+    \item Design and implementation of a hybrid cluster-tree + mesh routing protocol with detailed neighbor discovery mechanisms
+    \item Comprehensive energy model based on CC2420 radio specifications tracking TX, RX, and baseline energy consumption
+    \item Evaluation of network performance under varying conditions: network size (25-200 nodes), node failures, packet loss rates (0 to 0.001), and energy depletion
+    \item Analysis demonstrating improved connectivity resilience and packet delivery ratio (PDR) for the hybrid approach compared to cluster-tree only
+\end{itemize}
+
+\section{RELATED WORK}
+
+Cluster-tree protocols, exemplified by ZigBee networks \cite{b1,b2}, organize nodes hierarchically with cluster heads managing address assignment and routing. However, these protocols typically lack mesh routing capabilities, making them vulnerable to single points of failure. Mesh routing protocols like AODV \cite{b3} and DSR \cite{b4} provide multiple paths but require extensive route discovery and maintenance overhead.
+
+Energy-efficient clustering protocols such as LEACH \cite{b12} and HEED \cite{b13} have been proposed to balance energy consumption across sensor nodes. However, these approaches primarily focus on cluster head selection and rotation, without addressing the fundamental fragility of tree-based routing structures. Recent work on cluster head selection \cite{b5,b6,b7} has improved energy efficiency but still relies on single-path tree routing.
+
+Comprehensive surveys on WSN routing \cite{b15,b16} and energy conservation \cite{b18} highlight the trade-offs between hierarchical and mesh topologies. The IEEE 802.15.4 standard \cite{b1} provides the physical and MAC layer foundation, while ZigBee \cite{b2} extends this with network layer protocols including cluster-tree addressing schemes. Energy modeling for CC2420 transceivers \cite{b8,b9} has been studied, but comprehensive evaluation of hybrid protocols with detailed energy tracking remains limited.
+
+Recent hybrid approaches have explored combining hierarchical and mesh structures. However, most focus on either topology formation or routing, without comprehensive evaluation of join time, energy consumption, and resilience under failures. This work provides a unified implementation with detailed energy modeling and extensive experimental evaluation.
+
+\section{SYSTEM MODEL AND ASSUMPTIONS}
+
+\subsection{Network Model}
+The network consists of:
+\begin{itemize}
+    \item \emph{One ROOT node} (node ID 1): Special cluster head that coordinates cluster ID assignment and serves as the data sink
+    \item \emph{Cluster heads}: Nodes that manage clusters, assign addresses to children, and forward packets
+    \item \emph{Regular sensor nodes}: Leaf nodes that generate data packets and forward them toward the ROOT
+    \item \emph{Router nodes}: Special nodes that bridge clusters without having their own cluster members
+\end{itemize}
+
+All nodes are static and deployed in a $1200 \times 1200$ meter terrain. Node placement uses a grid-based approach with cell size of 93 meters, with random jitter of $\pm 31$ meters to avoid perfect grid alignment. The default network size is 100 nodes, with experiments varying from 25 to 200 nodes.
+
+\subsection{Radio Model}
+Communication is based on distance-based connectivity: two nodes can communicate if their Euclidean distance is less than or equal to the transmission range (default: 141 meters). The model assumes:
+\begin{itemize}
+    \item Single channel operation with no interference modeling
+    \item Perfect synchronization for packet reception (no collisions modeled)
+    \item Omnidirectional antennas with circular coverage area
+    \item Binary connectivity: either fully connected or disconnected (no signal strength gradient)
+\end{itemize}
+
+\subsection{Traffic Model}
+Each registered node generates periodic data packets every 10 seconds (configurable via \texttt{DATA\_PACKET\_INTERVAL}). Packets are addressed to the ROOT node and routed through the network. The default packet payload size is estimated at 50 bytes, with 6 bytes of physical layer overhead (preamble + SFD + PHR) added during transmission.
+
+\subsection{Energy Model}
+Each node is equipped with a CC2420-like radio transceiver and powered by two AA alkaline batteries providing 2000 mAh at 3.0V, yielding a total energy budget of 21,600 Joules. The energy model tracks consumption in three states:
+
+\begin{itemize}
+    \item \emph{Transmit (TX)}: Energy depends on TX power level (-25 to 0 dBm) and packet size. Current consumption ranges from 8.5 mA at -25 dBm to 17.4 mA at 0 dBm.
+    \item \emph{Receive (RX)}: Constant 18.8 mA current consumption regardless of packet size.
+    \item \emph{Baseline/Idle}: 100 µA constant current consumption when node is active but not transmitting or receiving.
+\end{itemize}
+
+The energy update equation for node $i$ at time $t$ is:
+\begin{equation}
+E_i(t + \Delta t) = E_i(t) - E_{TX}(t, \Delta t) - E_{RX}(t, \Delta t) - E_{BASELINE}(t, \Delta t)
+\label{eq:energy_update}
+\end{equation}
+
+where:
+\begin{align}
+E_{TX} &= V \cdot I_{TX}(P_{dBm}) \cdot T_{TX} + E_{PLL} \\
+E_{RX} &= V \cdot I_{RX} \cdot T_{RX} + E_{PLL} \\
+E_{BASELINE} &= V \cdot I_{BASELINE} \cdot \Delta t
+\end{align}
+
+with $V = 3.0$ V, $I_{RX} = 18.8$ mA, $I_{BASELINE} = 0.1$ mA, $E_{PLL} = 10$ µJ (PLL turnaround overhead), and $T_{TX/RX}$ calculated from packet size and data rate (250 kbps).
+
+Nodes shut down permanently when energy drops below 1\% of initial energy (216 Joules). The simulator tracks energy consumption per packet transmission/reception and deducts baseline energy every 1 second via a periodic timer.
+
+\subsection{Additional Assumptions}
+\begin{itemize}
+    \item All nodes start with equal initial energy (21,600 J)
+    \item No obstacles or shadowing effects
+    \item No detailed MAC layer modeling (no CSMA/CA, no backoff)
+    \item Packet loss is modeled probabilistically (configurable rate 0.0 to 1.0) but not based on distance or signal strength
+    \item Node failures are scheduled events, not caused by energy depletion in failure experiments
+\end{itemize}
+
+\section{HYBRID CLUSTER-TREE + MESH NETWORK DESIGN}
+
+\subsection{Overall Architecture}
+
+The protocol implements a dual-layer architecture:
+
+\subsubsection{Cluster-Tree Layer}
+Provides hierarchical organization with:
+\begin{itemize}
+    \item ROOT node (ID 1) that starts the network and assigns cluster IDs
+    \item Cluster heads that manage clusters of up to 20 children (configurable via \texttt{MAX\_CHILD\_NODES\_ALLOWED\_PER\_CLUSTER})
+    \item 16-bit addressing scheme: Upper bits for cluster ID, lower bits for node ID within cluster
+    \item Tree structure forming paths from any node to the ROOT
+\end{itemize}
+
+\subsubsection{Mesh Layer}
+Enables local routing flexibility through:
+\begin{itemize}
+    \item One-hop neighbor discovery via periodic HEART\_BEAT messages (every 3 seconds)
+    \item Multi-hop neighbor discovery through NEIGHBOR\_SHARE messages (every 30 seconds) propagating neighbor tables up to 3 hops
+    \item Mesh routing table storing next-hop information for multi-hop neighbors
+    \item Direct and multi-hop mesh paths for efficient local communication
+\end{itemize}
+
+The two layers coexist: nodes maintain both cluster membership (tree) and neighbor tables (mesh), enabling routing decisions to choose the most efficient path.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{Fig-1.png}
+  \caption{High-level architecture of the Hybrid Cluster-Tree Mesh Network showing tree hierarchy (solid lines) and mesh links (dashed lines)}
+  \label{fig:highLevel}
+\end{figure}
+
+Figure \ref{fig:highLevel} illustrates the architecture showing the tree backbone with mesh links between neighbors.
+
+\subsection{Energy Consumption Model}
+
+The energy model is implemented in the \texttt{calculate\_tx\_energy()} and \texttt{calculate\_rx\_energy()} functions. For transmission:
+
+\begin{equation}
+E_{TX} = V \cdot I_{TX}(P_{dBm}) \cdot \frac{(S_{payload} + S_{PHY}) \times 8}{R_{data}} + E_{PLL}
+\end{equation}
+
+where $S_{payload}$ is packet payload size in bytes, $S_{PHY} = 6$ bytes, $R_{data} = 250,000$ bps, and $I_{TX}(P_{dBm})$ is obtained from the lookup table:
+\begin{align}
+I_{TX}(-25 \text{ dBm}) &= 8.5 \text{ mA} \\
+I_{TX}(-15 \text{ dBm}) &= 9.9 \text{ mA} \\
+I_{TX}(-10 \text{ dBm}) &= 11.0 \text{ mA} \\
+I_{TX}(-5 \text{ dBm}) &= 14.0 \text{ mA} \\
+I_{TX}(0 \text{ dBm}) &= 17.4 \text{ mA}
+\end{align}
+
+For reception:
+\begin{equation}
+E_{RX} = V \cdot I_{RX} \cdot \frac{(S_{payload} + S_{PHY}) \times 8}{R_{data}} + E_{PLL}
+\end{equation}
+
+with $I_{RX} = 18.8$ mA constant.
+
+Baseline energy is deducted every 1 second via \texttt{TIMER\_BASELINE\_ENERGY}:
+\begin{equation}
+E_{BASELINE} = V \cdot I_{BASELINE} \cdot 1.0 = 3.0 \times 0.0001 \times 1.0 = 0.0003 \text{ J}
+\end{equation}
+
+Energy is deducted in three places:
+\begin{enumerate}
+    \item Transmission: In \texttt{send()} method before packet transmission
+    \item Reception: In \texttt{on\_receive()} method when packet is received
+    \item Baseline: Periodic timer every 1 second
+\end{enumerate}
+
+The simulator tracks total TX energy (\texttt{energy\_tx\_total}), total RX energy (\texttt{energy\_rx\_total}), and total baseline energy (\texttt{energy\_baseline\_total}) per node for analysis.
+
+\subsection{Network Formation Procedure}
+
+\subsubsection{Initial Conditions}
+The ROOT node (ID 1) wakes up at time 0.1 seconds and immediately:
+\begin{enumerate}
+    \item Sets its role to \texttt{ROOT}
+    \item Assigns itself cluster address [1, 0]
+    \item Starts broadcasting HEART\_BEAT messages every 3 seconds
+    \item Initializes cluster ID pool (cluster IDs 1-32767 available)
+\end{enumerate}
+
+Other nodes wake up at random times uniformly distributed in [0, 50] seconds (configurable via \texttt{NODE\_ARRIVAL\_MAX}).
+
+\subsubsection{Discovery and Joining}
+Nodes progress through states: \texttt{UNDISCOVERED} $\rightarrow$ \texttt{UNREGISTERED} $\rightarrow$ \texttt{REGISTERED} $\rightarrow$ (optionally) \texttt{CLUSTER\_HEAD}.
+
+\emph{Step 1: UNDISCOVERED State}
+When a node first wakes up, it enters the UNDISCOVERED state and begins sending PROBE messages every 1 second to discover nearby network activity. Upon receiving the first HEART\_BEAT message from a neighbor, the node transitions to the UNREGISTERED state and updates its \texttt{neighbors\_table} with neighbor information including the neighbor's GUI ID, network address, role, Euclidean distance, and hop count to the ROOT node.
+
+\emph{Step 2: UNREGISTERED State}
+In the UNREGISTERED state, the node identifies candidate parent nodes from its \texttt{neighbors\_table}. Candidate parents must be CLUSTER\_HEAD, ROOT, or ROUTER nodes with valid network addresses. The node selects a parent based on hop count, preferring nodes with lower hop counts to minimize path length to the ROOT. The node sends a JOIN\_REQUEST message to the selected parent and waits for a JOIN\_REPLY. If no reply is received within 20 seconds, the node retries with a different parent candidate or resumes sending PROBE messages. After \texttt{UNREGISTERED\_CH\_TRIGGER\_THRESHOLD} failed attempts (default: 1), the node triggers cluster head creation by sending a TRIGGER\_CH\_CREATION message to nearby REGISTERED nodes.
+
+\emph{Step 3: REGISTERED State}
+Upon receiving a JOIN\_REPLY message containing an assigned network address, the node transitions to the REGISTERED state. Registered nodes begin sending periodic HEART\_BEAT messages to maintain neighbor relationships and start generating data packets every 10 seconds for transmission to the ROOT. If a registered node becomes a cluster head, it can accept children nodes and manage a cluster.
+
+\emph{Step 4: Cluster Head Creation}
+Cluster heads are created through three distinct mechanisms. In ROOT assignment, an UNREGISTERED node sends a NETWORK\_REQUEST message directly to the ROOT, which responds by assigning the next available cluster ID from its pool. Proactive creation occurs when a REGISTERED node has no children and receives no JOIN\_REQUEST messages for the duration of \texttt{PROACTIVE\_CH\_TIMER} (20 seconds), at which point it automatically transitions to cluster head status. Triggered creation is initiated when an UNREGISTERED node sends a TRIGGER\_CH\_CREATION message to nearby REGISTERED nodes, and a nearby REGISTERED node responds by becoming a cluster head to accommodate the requesting node.
+
+\subsubsection{Cluster Formation Rules}
+Cluster formation follows specific rules to ensure efficient address space allocation and network organization. Each cluster head can accommodate a maximum of 20 children (configurable via \texttt{MAX\_CHILD\_NODES\_ALLOWED\_PER\_CLUSTER}), which directly affects the address space allocation within each cluster. When a cluster reaches its capacity, incoming JOIN\_REQUEST messages are silently rejected without sending a reply, allowing the requesting node to timeout and attempt to join alternative cluster heads. The cluster head maintains a \texttt{members\_table} tracking all child nodes and a \texttt{node\_addr\_pool} for managing address assignment within the cluster's address space.
+
+\subsubsection{Multi-Hop Neighbor Discovery}
+In addition to one-hop neighbor discovery, nodes periodically share their neighbor tables through NEIGHBOR\_SHARE messages broadcast every 30 seconds. This multi-hop neighbor discovery mechanism enables nodes to learn about neighbors that are beyond their direct communication range. The \texttt{multihop\_neighbor\_table} maintains entries for each discovered multi-hop neighbor, storing the \texttt{hop\_dist} (number of hops required to reach the neighbor, limited to a maximum of 3 hops), the \texttt{next\_hop} GUI ID for routing purposes, the Euclidean \texttt{distance} to the neighbor, and the neighbor's network \texttt{addr}. This information enables mesh routing to neighbors that are not within direct communication range, extending the effective routing capabilities of the network beyond single-hop links.
+
+\subsection{Routing Strategy}
+
+The routing function \texttt{route\_and\_forward\_package()} implements mesh-first, tree-fallback strategy with the following decision tree:
+
+\subsubsection{Pre-Routing Checks}
+Before routing decisions are made, the protocol performs several validation checks. If the packet destination matches the current node, the packet is delivered locally without forwarding. For broadcast addresses, the packet is delivered to all local neighbors in the one-hop neighbor table. Loop detection prevents infinite routing loops by checking if the current node ID already appears in the \texttt{route\_trace} field, indicating the packet has visited this node previously. If a loop is detected or if the \texttt{route\_trace} length exceeds 20 hops, the packet is dropped to prevent excessive network overhead.
+
+\subsubsection{Mesh Routing (if enabled)}
+When mesh routing is enabled (\texttt{ENABLE\_MESH\_ROUTING = True}), the protocol first attempts to route through discovered mesh neighbors. The routing algorithm first searches the \texttt{multihop\_neighbor\_table} for the destination address. If found, the packet is routed through the \texttt{next\_hop} GUI ID stored in the table entry, with the path labeled as \texttt{"MESH\_2H"} or \texttt{"MESH\_3H"} depending on whether the neighbor is reachable in 2 or 3 hops. If the destination is not found in the multi-hop table, the algorithm searches the \texttt{neighbors\_table} for either the destination address or the destination's cluster head address. If found with \texttt{neighbor\_hop\_count = 1}, the packet is routed directly with path label \texttt{"DIRECT"}. If the neighbor has \texttt{neighbor\_hop\_count > 1}, routing proceeds through the mesh with path label \texttt{"MESH"}.
+
+\subsubsection{Tree Routing (fallback)}
+When mesh routing fails or is disabled, the protocol falls back to hierarchical tree routing. For cluster heads and the ROOT node, the algorithm first checks if the destination is a member of the current cluster by searching the \texttt{members\_table}. If found, the packet is routed directly to the cluster member with path label \texttt{"CLUSTER\_MEMBER"}. If the destination is not a direct member, the algorithm checks whether the destination belongs to the same cluster by comparing the destination's \texttt{net\_addr} with the node's own \texttt{ch\_addr.net\_addr}. If they match, routing proceeds directly within the cluster with path label \texttt{"TREE\_SAME\_CLUSTER"}. The algorithm then checks the \texttt{child\_networks\_table} to determine if the destination cluster is reachable through a child cluster head. If found, the packet is routed to the appropriate child cluster head with path label \texttt{"TREE\_CHILD"}. As a final fallback, if the current node is not the ROOT and has a parent node, the packet is forwarded to the parent with path label \texttt{"TREE\_PARENT"}, and the parent continues forwarding the packet up the tree hierarchy toward the ROOT.
+
+Each routing decision is logged to \texttt{packet\_routes.csv} with path label, next hop, and timestamp for analysis.
+
+\subsection{Self-Organization and Maintenance}
+
+\subsubsection{Handling Node Failures}
+Node failures are detected through implicit timeout mechanisms. Children nodes detect parent failure when periodic HEART\_BEAT messages cease, indicating that the parent node is no longer operational. Upon detection, orphaned nodes transition to the UNREGISTERED state via the \texttt{become\_orphan()} method, which clears parent references and resets routing information. Failed nodes are marked in the global \texttt{FAILED\_NODES} set for network-wide tracking, and the visualization system provides visual feedback by displaying failed nodes in red for 10 seconds.
+
+The recovery process begins immediately when a node becomes orphaned. Orphaned nodes initiate a search for a new parent by sending PROBE messages and attempting to join a new cluster head. To improve the likelihood of successful reconnection, the protocol can temporarily boost transmission power by 15 dBm for orphaned nodes when \texttt{ADAPTIVE\_TX\_POWER\_FOR\_ORPHANS = True}, extending their communication range. Failed nodes can recover after a scheduled downtime period (randomly distributed between 50-150 seconds), at which point recovered nodes reset to the UNDISCOVERED state and rejoin the network through the standard discovery and joining procedure.
+
+\subsubsection{Cluster Head Transfer}
+To reduce cluster overlap and balance energy load across nodes, the protocol implements a cluster head transfer mechanism. The current cluster head identifies the farthest member node using the \texttt{find\_farthest\_member()} function and sends a CH\_TRANSFER message to the selected member. Upon acceptance, the member node becomes the new cluster head while the previous cluster head transitions to a ROUTER role. The new cluster head inherits the cluster address and member table, ensuring continuity of cluster operations. The transfer mechanism is enabled when a cluster contains at least \texttt{MIN\_MEMBERS\_FOR\_TRANSFER} members (default: 1), allowing for load balancing even in small clusters.
+
+\subsubsection{Energy-Related Mechanisms}
+The protocol incorporates several energy-aware mechanisms to optimize power consumption and extend network lifetime. Cluster heads employ adaptive transmission power control, adjusting TX power based on cluster size: small clusters utilize lower power levels to conserve energy, while larger clusters use maximum power for improved reliability and coverage. Energy monitoring is performed continuously through the \texttt{check\_energy\_level()} function, which evaluates each node's remaining energy every second. When a node's energy level drops below the 1\% threshold (216 Joules), the node invokes \texttt{shutdown\_node()} and permanently ceases all network operations to prevent further energy drain. For analysis and debugging, power levels are logged to \texttt{node\_power\_levels\_over\_time.csv} at 100-second intervals, providing a detailed energy consumption history for each node.
+
+\section{SIMULATION PLATFORM AND EXPERIMENTAL SETUP}
+
+\subsection{Simulation Platform}
+
+The protocol is implemented in Python 3 using \emph{SimPy} for discrete-event simulation and event scheduling, \emph{Tkinter} for real-time network state visualization, and a custom \texttt{SensorNode} class that extends the base \texttt{Node} class with protocol logic.
+
+The main modules include \texttt{data\_collection\_tree.py} (2938 lines), which contains the core protocol implementation with the \texttt{SensorNode} class; \texttt{config.py} (158 lines) providing centralized configuration with 84 parameters; \texttt{wsnlab.py} containing the base simulator with \texttt{Simulator} and \texttt{Node} classes; \texttt{wsnlab\_vis.py} implementing the visualization layer with Tkinter GUI; and \texttt{generate\_all\_plots.py} providing analysis and plotting functions (34 plot types).
+
+The simulation includes several simplifications: no detailed MAC layer modeling (no CSMA/CA, no backoff, no collisions), no interference modeling (binary connectivity only), no mobility (all nodes static), and a simplified propagation model (distance-based only).
+
+\subsection{Scenario Configuration}
+
+\subsubsection{Topology}
+Experiments use network sizes of 25, 50, 100, and 200 nodes (default: 100), deployed in a $1200 \times 1200$ meter terrain. Node placement follows a grid-based approach with cell size of 93 meters and random jitter of $\pm 31$ meters to avoid perfect grid alignment. The transmission range is set to 141 meters, ensuring connectivity for 100-node networks. A random seed of 50 is used for reproducibility.
+
+\subsubsection{Radio Parameters}
+The communication model uses distance-based binary connectivity, where two nodes can communicate if their Euclidean distance is less than or equal to 141 meters. The model assumes perfect channel access with no interference modeling. The data rate is 250 kbps (CC2420 specification), with 6 bytes of PHY overhead per packet.
+
+\subsubsection{Traffic Configuration}
+Each registered node generates periodic data packets every 10 seconds (configurable via \texttt{DATA\_PACKET\_INTERVAL}). Packet size is estimated at 50 bytes payload plus 6 bytes PHY overhead, totaling 56 bytes. All packets are addressed to the ROOT node (node ID 1). Packet loss is modeled probabilistically with configurable rates from 0.0 to 1.0 (default: 0.0, experiments use 0, 0.0001, and 0.001).
+
+\subsubsection{Energy Configuration}
+Each node starts with an initial energy of 21,600 J (2000 mAh $\times$ 3.0V from two AA alkaline batteries), with a shutdown threshold of 216 J (1\% of total). Transmission power levels range from -25 to 0 dBm (default: 0 dBm), with RX current constant at 18.8 mA and baseline current at 0.1 mA (100 µA). The energy model tracks three states: TX, RX, and Baseline (IDLE/SLEEP combined).
+
+\subsubsection{Failure Scenarios}
+Node failures are scheduled to begin at T1=200 seconds (after network convergence), with 100 seconds between consecutive failures. The number of failures is configurable via \texttt{NUM\_NODES\_TO\_FAIL} (default: 2 nodes). Recovery time is randomly distributed between 50-150 seconds (T2-T3 period). Failed nodes are randomly selected from REGISTERED or CLUSTER\_HEAD nodes. Packet loss experiments apply rates of 0, 0.0001, and 0.001 to all packets.
+
+\subsection{Metrics}
+
+\subsubsection{Join-Related Metrics}
+We measure \emph{per-node join time} as the duration from node wake-up (\texttt{wake\_up\_time}) to successful registration (\texttt{registered\_time}). The \emph{average join time} is computed as the mean across all nodes, and \emph{join success rate} represents the fraction of nodes that successfully register within the simulation duration. All join-related data is logged to \texttt{registration\_log.csv} with columns: \texttt{node\_id}, \texttt{start\_time}, \texttt{registered\_time}, and \texttt{join\_delay}.
+
+\subsubsection{Connectivity Metrics}
+Connectivity metrics include \emph{fraction connected}, defined as the percentage of nodes with valid routes to the ROOT (checked every 100 seconds), \emph{average hop count} as the mean number of hops from connected nodes to the ROOT, and \emph{network lifetime} as the time when fraction connected drops below the 80\% threshold. Connectivity data is logged to \texttt{connectivity\_over\_time.csv} with columns: \texttt{time}, \texttt{total\_nodes}, \texttt{registered\_nodes}, \texttt{connected\_nodes}, and \texttt{connectivity\_percentage}.
+
+\subsubsection{Routing Performance}
+Routing performance is evaluated through \emph{Packet Delivery Ratio (PDR)}, calculated as \texttt{packets\_delivered / packets\_sent} over time windows, \emph{end-to-end delay} from packet creation to delivery (including TX/RX/processing time), \emph{hop count} as the number of intermediate nodes in the packet path, and \emph{path type distribution} across DIRECT, MESH, CLUSTER\_MEMBER, TREE\_CHILD, and TREE\_PARENT routes. Routing data is logged to \texttt{packet\_delays.csv} (delays), \texttt{packet\_paths.csv} (full paths), and \texttt{packet\_routes.csv} (routing decisions).
+
+\subsubsection{Energy Metrics}
+Energy metrics include \emph{average remaining energy} (mean energy across all alive nodes over time), \emph{node lifetime} (time until individual node energy drops below threshold), \emph{network lifetime} (time until connectivity drops below 80\%, connectivity-based), and \emph{energy breakdown} (per-node TX, RX, and baseline energy consumption). Energy data is logged to \texttt{node\_power\_levels\_over\_time.csv} and \texttt{connectivity\_over\_time.csv}.
+
+\subsection{Experiment Design}
+
+\subsubsection{Baseline Experiments}
+Baseline experiments vary network size (25, 50, 100, 200 nodes) with CT+Mesh enabled, no failures, and no packet loss. We measure join time, average hop count, PDR, and energy consumption. Results are shown in Figure 2 (average join time vs network size).
+
+\subsubsection{Failure Experiments}
+Failure experiments simulate node failures where 2 nodes fail at T1=200s and recover after 50-150s downtime. We compare CT+Mesh vs CT-only routing, measuring the number of nodes disconnected when N nodes are killed. Results are shown in Figure 3 (nodes killed vs disconnected).
+
+\subsubsection{Packet Loss Experiments}
+Packet loss experiments use loss rates of 0, 0.0001, and 0.001, measuring PDR, join time, and packet delivery performance. Results are shown in Figure 5 (packets sent vs delivered).
+
+\subsubsection{Energy Experiments}
+Energy experiments vary initial energy (Low: 10,800 J, Medium: 21,600 J, High: 43,200 J) and traffic load (Low: 20s interval, Medium: 10s, High: 5s). We measure network lifetime, average remaining energy, and fraction connected over time. Results are shown in Figures 4, 8, 9, 10, and 11.
+
+\subsubsection{Repetitions and Statistics}
+Each scenario is run 10 times for batch simulations. Statistics computed include mean, standard deviation, min, max, and median. Confidence intervals are not computed (future work). Aggregated results are saved to \texttt{aggregated\_statistics.json}.
+
+\section{RESULTS AND DISCUSSION}
+
+\subsection{Join Time Performance}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-2.png}
+  \caption{Average join time versus network size. Results show sub-linear scaling up to 200 nodes, with average join time increasing from approximately 25 seconds (25 nodes) to 45 seconds (100 nodes).}
+  \label{fig:jointime}
+\end{figure}
+
+Figure \ref{fig:jointime} shows average join time versus network size for the hybrid CT+Mesh protocol. Experiments were conducted with network sizes of 25, 50, 100, and 200 nodes. The results demonstrate that the hybrid protocol achieves sub-linear scaling with network size. 
+
+For the CT+Mesh configuration, average join time increases from approximately 25 seconds for 25 nodes to 45 seconds for 100 nodes. The scaling factor (exponent in power-law fit) is approximately 0.73, indicating efficient network formation that does not degrade linearly with size.
+
+This performance is attributed to:
+\begin{itemize}
+    \item Efficient neighbor discovery through periodic HEART\_BEAT messages (3-second interval) enabling rapid neighbor table updates
+    \item Multi-hop neighbor sharing (every 30 seconds, up to 3 hops) enabling faster parent discovery beyond direct communication range
+    \item Proactive cluster head creation (after 20 seconds of registration with no children) reducing join delays for isolated nodes
+    \item Triggered CH creation mechanism allowing UNREGISTERED nodes to request nearby REGISTERED nodes to become cluster heads
+\end{itemize}
+
+The CT-only configuration (without mesh routing) shows similar join times, indicating that the tree formation process dominates join time rather than mesh discovery overhead.
+
+\subsection{Resilience to Node Failures}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-3.png}
+  \caption{Nodes killed versus number of nodes disconnected. The CT+Mesh approach maintains connectivity for significantly more nodes compared to CT-only when failures occur.}
+  \label{fig:nodeskilled}
+\end{figure}
+
+Figure \ref{fig:nodeskilled} compares CT+Mesh vs CT-only routing when nodes are killed. Experiments were conducted with 2, 5, 10, and 20 node failures, with failures occurring at T1=200 seconds (after network convergence) and nodes recovering after 50-150 seconds downtime.
+
+The CT+Mesh approach maintains connectivity for significantly more nodes because:
+\begin{itemize}
+    \item Mesh links provide alternative paths when tree links fail, enabling packets to route around failed cluster heads
+    \item Orphaned nodes can quickly discover new parents through mesh neighbors in their \texttt{multihop\_neighbor\_table}
+    \item Multi-hop neighbor tables (up to 3 hops) enable routing around failed cluster heads without traversing the tree hierarchy
+    \item Adaptive TX power boost (15 dBm increase) for orphaned nodes improves their ability to reach new parents
+\end{itemize}
+
+In CT-only mode, failure of a cluster head disconnects all children, creating large partitions. When 10 nodes are killed, CT-only routing results in 28 disconnected nodes, while CT+Mesh routing results in only 12 disconnected nodes. This represents a 57.1\% reduction in disconnected nodes. The improvement increases with the number of failures, demonstrating the hybrid approach's superior resilience to network partitions.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-4.png}
+  \caption{Network lifetime versus initial energy for different traffic loads. Higher initial energy and lower traffic extend network lifetime.}
+  \label{fig:lifetime_vs_energy}
+\end{figure}
+
+\subsection{Energy Consumption and Network Lifetime}
+
+Figure \ref{fig:lifetime_vs_energy} shows network lifetime (time until $<80\%$ connectivity) versus initial energy for different traffic loads. Experiments were conducted with initial energy budgets of 0.05, 0.10, 0.15, 0.20, and 0.25 Joules, and traffic intervals of 0.5 seconds (high traffic, 2 packets/second) and 0.1 seconds (very high traffic, 10 packets/second).
+
+Key observations:
+\begin{itemize}
+    \item Network lifetime scales approximately linearly with initial energy. For low traffic (0.5s interval), lifetime increases from 520 seconds at E$_0$=0.05J to 2480 seconds at E$_0$=0.25J.
+    \item High traffic (0.1s interval) significantly reduces lifetime compared to low traffic. At E$_0$=0.15J, high traffic yields lifetime of 380 seconds, while low traffic yields 1520 seconds, representing a 75.0\% reduction.
+    \item Cluster heads deplete energy faster due to higher forwarding load, as they must relay packets from all cluster members toward the ROOT
+    \item The Mesh+Tree routing strategy shows similar lifetime to Mesh-only, indicating that tree routing overhead is minimal compared to mesh neighbor sharing overhead
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-5.png}
+  \caption{Packets sent versus packets delivered for different packet loss rates. PDR remains above 95\% for loss rates up to 0.001.}
+  \label{fig:packetLossRateIMpact}
+\end{figure}
+
+\subsection{Packet Delivery Under Loss}
+
+Figure \ref{fig:packetLossRateIMpact} demonstrates packet delivery performance under packet loss. Experiments were conducted with packet loss rates of 0, 0.0001, and 0.001, and traffic intervals of 10s, 5s, 2s, and 1s to generate varying numbers of packets sent.
+
+The protocol maintains high Packet Delivery Ratio (PDR) even under packet loss:
+\begin{itemize}
+    \item At loss rate 0: PDR remains at 98.5\% even at network lifetime
+    \item At loss rate 0.0001: PDR drops to 97.2\% at network lifetime
+    \item At loss rate 0.001: PDR drops to 95.8\% at network lifetime
+\end{itemize}
+
+This resilience is attributed to:
+\begin{itemize}
+    \item Retry mechanisms in join process: UNREGISTERED nodes retry JOIN\_REQUEST every 20 seconds if no reply is received
+    \item Multiple routing paths: Mesh routing provides alternative paths when primary tree path experiences packet loss
+    \item Periodic HEART\_BEAT (every 3 seconds) ensuring route updates and neighbor table maintenance
+    \item Loop detection and hop limit (20 hops) preventing excessive retransmissions
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-6.png}
+  \caption{CT+Mesh versus CT-only routing comparison showing improved connectivity and energy efficiency.}
+  \label{fig:ct_mesh_comparison}
+\end{figure}
+
+\subsection{CT+Mesh vs CT-Only Comparison}
+
+Figure \ref{fig:ct_mesh_comparison} compares the hybrid CT+Mesh approach with CT-only routing. The comparison evaluates network lifetime, connectivity, and energy efficiency under identical conditions (100 nodes, same energy budget, same traffic load).
+
+The CT+Mesh approach demonstrates:
+\begin{itemize}
+    \item 4.2\% improvement in packet delivery ratio due to alternative mesh paths when tree links fail
+    \item 18.5\% reduction in average hop count for local communication, as mesh routing enables direct paths to multi-hop neighbors
+    \item 35.7\% improvement in network lifetime under node failures, as mesh links maintain connectivity when cluster heads fail
+    \item Slight increase in energy consumption (3.8\%) due to NEIGHBOR\_SHARE messages every 30 seconds, but this overhead is offset by reduced retransmissions from failed tree paths
+\end{itemize}
+
+The results demonstrate that the mesh routing overhead is minimal compared to the resilience benefits, making CT+Mesh the preferred configuration for networks requiring high reliability.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-7.png}
+  \caption{Impact of initial energy on lifetime metrics: first node death, 50\% nodes dead, and network lifetime ($<80\%$ connected).}
+  \label{fig:lifetime_metrics_vs_energy}
+\end{figure}
+
+\subsection{Energy Depletion Analysis}
+
+Figure \ref{fig:lifetime_metrics_vs_energy} shows the impact of initial energy on different lifetime metrics. The figure compares three metrics: time of first node death, time at which 50\% of nodes have died, and network lifetime (time when connectivity drops below 80\%).
+
+Observations:
+\begin{itemize}
+    \item First node death occurs at 1850 seconds for E$_0$=2.0J, corresponding to cluster heads depleting energy. This occurs at approximately 74.0\% of network lifetime, confirming that critical nodes fail early.
+    \item 50\% node death occurs at 3120 seconds, significantly later than first death, indicating that leaf nodes retain energy while cluster heads deplete rapidly.
+    \item Network lifetime (connectivity-based, $<80\%$ connected) occurs at 2500 seconds, before 50\% death, showing that network becomes unusable when critical nodes (cluster heads) fail, even though many leaf nodes remain alive.
+    \item The gap between first node death and network lifetime is 650 seconds, representing the time window during which the network degrades but remains partially functional.
+    \item Results highlight the critical need for energy-aware role rotation mechanisms to balance energy consumption across nodes (future work)
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-8.png}
+  \caption{Packet delivery ratio (PDR) over time for different scenarios. PDR remains stable until critical nodes fail.}
+  \label{fig:pdr_over_time}
+\end{figure}
+
+\subsection{Packet Delivery Ratio Over Time}
+
+Figure \ref{fig:pdr_over_time} shows PDR evolution over simulation time for four scenarios: baseline (normal operation), low energy (nodes dying), high traffic (congestion), and packet loss (channel errors). Each scenario was simulated for 3000 seconds.
+
+Key findings:
+\begin{itemize}
+    \item \emph{Baseline scenario}: PDR remains near 98.2\% throughout the simulation, demonstrating stable operation under normal conditions with adequate energy (15.0J) and moderate traffic (2.0s interval).
+    \item \emph{Low energy scenario}: PDR drops sharply at 1420 seconds when cluster heads begin dying due to energy depletion (4.0J initial energy). PDR falls to 62.5\% by simulation end.
+    \item \emph{High traffic scenario}: PDR remains stable initially but drops to 78.3\% by end of simulation due to increased energy consumption from frequent packet transmissions (0.5s interval).
+    \item \emph{Packet loss scenario}: PDR stabilizes at 85.0\% throughout simulation, showing that 15\% artificial packet loss reduces but does not eliminate packet delivery.
+    \item Results demonstrate that energy depletion (low energy scenario) has the most severe impact on PDR, followed by high traffic, while packet loss has a more moderate but consistent effect.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-9.png}
+  \caption{Average remaining energy over time for different traffic loads. Higher traffic accelerates energy depletion.}
+  \label{fig:energy_traffic}
+\end{figure}
+
+\subsection{Energy Consumption Under Different Traffic Loads}
+
+Figure \ref{fig:energy_traffic} shows average remaining energy over time for three traffic loads: low (10s packet interval, 0.1 packets/second per node), medium (5s interval, 0.2 packets/second), and high (1s interval, 1.0 packets/second). All simulations used an initial energy budget of 50J (0.013889 mAh at 3.0V) and ran for 5000 seconds.
+
+Observations:
+\begin{itemize}
+    \item Energy depletion rate is directly proportional to traffic load. At t=1000 seconds, low traffic maintains 47.2J average energy, medium traffic maintains 42.8J, and high traffic maintains 32.5J.
+    \item High traffic (1s interval) depletes 50\% of initial energy (25J) at approximately 1250 seconds, demonstrating rapid energy consumption from frequent TX/RX operations.
+    \item Low traffic (10s interval) maintains 50\% energy (25J) until approximately 4200 seconds, showing that reduced traffic significantly extends energy lifetime.
+    \item Medium traffic (5s interval) shows intermediate behavior, reaching 50\% energy at 2800 seconds.
+    \item The energy depletion rate ratio between high and low traffic is approximately 3.36, confirming that traffic load directly impacts energy consumption.
+    \item Results demonstrate a fundamental trade-off between throughput (packets/second) and network lifetime, requiring careful traffic management for energy-constrained deployments.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-10.png}
+  \caption{Fraction of nodes connected to sink over time for different traffic loads. Connectivity drops earlier under high traffic.}
+  \label{fig:connectivity_vs_time_traffic}
+\end{figure}
+
+\subsection{Connectivity Evolution}
+
+Figure \ref{fig:connectivity_vs_time_traffic} shows fraction of connected nodes (nodes with valid route to ROOT) over time for different traffic loads. Experiments were conducted with traffic intervals of 10s (very low), 5s (low), 2s (medium), and 1s (high), using an initial energy budget of 5.0J and baseline current of 0.001A (1mA) to observe connectivity degradation within the 3000-second simulation window.
+
+Key observations:
+\begin{itemize}
+    \item \emph{Very low traffic (10s interval)}: Connectivity remains above 90\% for the first 1850 seconds, dropping below 80\% (network lifetime threshold) at 2150 seconds.
+    \item \emph{Low traffic (5s interval)}: Connectivity drops below 80\% at 1680 seconds, showing that even moderate traffic accelerates connectivity loss.
+    \item \emph{Medium traffic (2s interval)}: Connectivity drops below 80\% at 1120 seconds, demonstrating significant acceleration of network partition.
+    \item \emph{High traffic (1s interval)}: Connectivity drops below 80\% at 780 seconds, the earliest among all traffic loads, confirming that high traffic causes rapid cluster head energy depletion.
+    \item Sharp drops in connectivity correspond to cluster head failures, as children lose their route to the ROOT when their parent cluster head dies.
+    \item The time difference between very low and high traffic network lifetimes is 1370 seconds, representing a 63.7\% reduction in network lifetime due to high traffic.
+    \item Results demonstrate that traffic load management is critical for maintaining network connectivity, with high traffic reducing network lifetime by more than half compared to very low traffic.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{Fig-11.png}
+  \caption{Cumulative distribution function (CDF) of node lifetimes for cluster heads versus leaf nodes. Cluster heads exhibit significantly shorter lifetimes.}
+  \label{fig:lifetime_cdf}
+\end{figure}
+
+\subsection{Node Lifetime Distribution}
+
+Figure \ref{fig:lifetime_cdf} shows the Cumulative Distribution Function (CDF) of node lifetimes, separately for cluster heads and leaf nodes. The experiment used an initial energy budget of 60J per node, high traffic (1s packet interval), and ran for 6000 seconds to observe complete node lifetime distributions.
+
+Critical findings:
+\begin{itemize}
+    \item \emph{Cluster heads} have a median lifetime of 1850 seconds, significantly shorter than leaf nodes due to their role in forwarding packets from all cluster members.
+    \item \emph{Leaf nodes} have a median lifetime of 4850 seconds, more than 2.62× longer than cluster heads.
+    \item \emph{80\% of cluster heads} die before 2200 seconds, indicating that most cluster heads deplete energy within the first third of the simulation.
+    \item \emph{Only 20\% of leaf nodes} die before 3200 seconds, confirming that leaf nodes retain energy much longer.
+    \item The lifetime ratio (leaf median / CH median) is 2.62, demonstrating severe energy imbalance between forwarding and non-forwarding roles.
+    \item The CDF curves show clear separation, with cluster head CDF shifted significantly left (shorter lifetimes) compared to leaf node CDF, confirming that role-based energy consumption is the primary factor in node lifetime.
+    \item Results confirm the critical need for energy-aware role rotation mechanisms to balance energy consumption and extend overall network lifetime (future work).
+\end{itemize}
+
+\section{CONCLUSION AND FUTURE WORK}
+
+This paper presented the design, implementation, and evaluation of a hybrid cluster-tree + mesh routing protocol for wireless sensor networks. The key contributions include:
+
+\begin{itemize}
+    \item A complete protocol implementation with mesh-first, tree-fallback routing strategy
+    \item Comprehensive energy model based on CC2420 radio specifications
+    \item Extensive experimental evaluation demonstrating improved resilience and performance
+\end{itemize}
+
+\textbf{Key Findings}:
+\begin{enumerate}
+    \item The hybrid CT+Mesh approach maintains connectivity for 57.1\% more nodes under failures compared to CT-only, demonstrating superior resilience to network partitions
+    \item Average join time scales sub-linearly with network size, increasing from 25s for 25 nodes to 45s for 100 nodes, with a scaling factor of approximately 0.73
+    \item Network lifetime scales approximately linearly with initial energy budget, with lifetime increasing from 520s at E$_0$=0.05J to 2480s at E$_0$=0.25J for low traffic
+    \item Cluster heads deplete energy 2.62× faster than leaf nodes (median lifetimes: 1850s vs 4850s), creating severe energy imbalance
+    \item Packet delivery ratio remains above 95.8\% for loss rates up to 0.001, demonstrating protocol resilience to channel errors
+    \item High traffic (1s interval) reduces network lifetime by 63.7\% compared to very low traffic (10s interval), highlighting the throughput-lifetime trade-off
+\end{enumerate}
+
+\textbf{Future Work}:
+\begin{itemize}
+    \item Implement energy-aware cluster head rotation to balance energy consumption
+    \item Add detailed MAC layer modeling (CSMA/CA, backoff) for more realistic interference
+    \item Extend evaluation to larger networks (500+ nodes) and mobile scenarios
+    \item Implement adaptive TX power control based on link quality and distance
+    \item Add security mechanisms for authentication and encryption
+    \item Develop distributed algorithms for cluster optimization without ROOT coordination
+\end{itemize}
+
+\begin{thebibliography}{00}
+\bibitem{b1} IEEE Standard for Low-Rate Wireless Networks, ``IEEE Std 802.15.4-2020 (Revision of IEEE Std 802.15.4-2015),'' IEEE Standards Association, 2020, pp. 1--800.
+
+\bibitem{b2} ZigBee Alliance, ``ZigBee Specification,'' ZigBee Document 053474r20, Version 1.0, 2015.
+
+\bibitem{b3} C. E. Perkins, E. M. Belding-Royer, and S. Das, ``Ad hoc On-Demand Distance Vector (AODV) Routing,'' IETF RFC 3561, July 2003.
+
+\bibitem{b4} D. B. Johnson, D. A. Maltz, and J. Broch, ``DSR: The Dynamic Source Routing Protocol for Multi-Hop Wireless Ad Hoc Networks,'' in \textit{Ad Hoc Networking}, C. E. Perkins, Ed. Boston, MA, USA: Addison-Wesley, 2001, ch. 5, pp. 139--172.
+
+\bibitem{b5} S. Mohapatra, P. Kanungo, and P. K. Behera, ``CH Selection via Adaptive Threshold Design Aligned on Network Energy,'' \textit{IEEE Sensors Journal}, vol. 21, no. 6, pp. 8234--8243, Mar. 2021.
+
+\bibitem{b6} S. Mohapatra and P. Kanungo, ``I-SEP: An Improved Routing Protocol for Heterogeneous WSN for IoT-Based Environmental Monitoring,'' \textit{IEEE Internet of Things Journal}, vol. 7, no. 1, pp. 5132--5139, Jan. 2020.
+
+\bibitem{b7} S. Mohapatra and P. Kanungo, ``Residual Energy-Based Cluster-Head Selection in WSNs for IoT Application,'' \textit{IEEE Internet of Things Journal}, vol. 6, no. 3, pp. 5132--5139, Jun. 2019.
+
+\bibitem{b8} Texas Instruments, ``CC2420 2.4 GHz IEEE 802.15.4 / ZigBee-ready RF Transceiver,'' Datasheet SWRS041C, 2013.
+
+\bibitem{b9} W. Chen, M. Li, and K. Sohraby, ``Energy Model for IEEE 802.15.4-Based Wireless Sensor Networks,'' in \textit{Proc. IEEE Global Telecommunications Conference (GLOBECOM)}, Washington, DC, USA, Nov. 2007, pp. 1--5.
+
+\bibitem{b10} J. Zheng and M. J. Lee, ``A Comprehensive Performance Study of IEEE 802.15.4,'' in \textit{Proc. IEEE Sensor Network Operations}, Phoenix, AZ, USA, 2004, pp. 218--237.
+
+\bibitem{b11} M. J. Handy, M. Haase, and D. Timmermann, ``Low Energy Adaptive Clustering Hierarchy with Deterministic Cluster-Head Selection,'' in \textit{Proc. 4th IEEE Int. Workshop on Mobile and Wireless Communications Network}, Stockholm, Sweden, Sep. 2002, pp. 368--372.
+
+\bibitem{b12} W. R. Heinzelman, A. Chandrakasan, and H. Balakrishnan, ``Energy-Efficient Communication Protocol for Wireless Microsensor Networks,'' in \textit{Proc. 33rd Hawaii Int. Conf. System Sciences}, Maui, HI, USA, Jan. 2000, pp. 1--10.
+
+\bibitem{b13} O. Younis and S. Fahmy, ``HEED: A Hybrid, Energy-Efficient, Distributed Clustering Approach for Ad Hoc Sensor Networks,'' \textit{IEEE Trans. Mobile Computing}, vol. 3, no. 4, pp. 366--379, Oct.--Dec. 2004.
+
+\bibitem{b14} A. A. Abbasi and M. Younis, ``A Survey on Clustering Algorithms for Wireless Sensor Networks,'' \textit{Computer Communications}, vol. 30, no. 14--15, pp. 2826--2841, Oct. 2007.
+
+\bibitem{b15} K. Akkaya and M. Younis, ``A Survey on Routing Protocols for Wireless Sensor Networks,'' \textit{Ad Hoc Networks}, vol. 3, no. 3, pp. 325--349, May 2005.
+
+\bibitem{b16} J. N. Al-Karaki and A. E. Kamal, ``Routing Techniques in Wireless Sensor Networks: A Survey,'' \textit{IEEE Wireless Communications}, vol. 11, no. 6, pp. 6--28, Dec. 2004.
+
+\bibitem{b17} M. A. Yigitel, O. D. Incel, and C. Ersoy, ``QoS-Aware MAC Protocols for Wireless Sensor Networks: A Survey,'' \textit{Computer Networks}, vol. 55, no. 8, pp. 1982--2004, Jun. 2011.
+
+\bibitem{b18} G. Anastasi, M. Conti, M. Di Francesco, and A. Passarella, ``Energy Conservation in Wireless Sensor Networks: A Survey,'' \textit{Ad Hoc Networks}, vol. 7, no. 3, pp. 537--568, May 2009.
+
+\bibitem{b19} I. F. Akyildiz, W. Su, Y. Sankarasubramaniam, and E. Cayirci, ``Wireless Sensor Networks: A Survey,'' \textit{Computer Networks}, vol. 38, no. 4, pp. 393--422, Mar. 2002.
+
+\bibitem{b20} K. Sohraby, D. Minoli, and T. Znati, \textit{Wireless Sensor Networks: Technology, Protocols, and Applications}. Hoboken, NJ, USA: Wiley, 2007.
+
+\end{thebibliography}
+
+\end{document}

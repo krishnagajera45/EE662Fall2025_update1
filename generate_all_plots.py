@@ -3618,11 +3618,11 @@ def plot_fig8_pdr_over_time():
     
     # If no Fig 8 specific folders, use any results folders
     if not fig8_folders:
-    folders = find_results_folders()
-    if len(folders) == 0:
+        folders = find_results_folders()
+        if len(folders) == 0:
             print("    Warning: No result folders found")
             print("    Run: python3 run_fig8_multi_experiment.py")
-        return
+            return
         fig8_folders = [Path(f[0]) if not isinstance(f[0], Path) else f[0] for f in folders]
     
     fig, ax = plt.subplots(figsize=(12, 8))
@@ -3679,7 +3679,7 @@ def plot_fig8_pdr_over_time():
                 
                 ax.plot(times, pdr_values, linewidth=2.5, label=scenario_name, 
                        color=color, marker=marker, markersize=5, markevery=5, alpha=0.85)
-            has_data = True
+                has_data = True
                 
                 avg_pdr = np.mean(pdr_values)
                 print(f"    {scenario_name}: {len(times)} points, avg PDR={avg_pdr:.1f}%")
