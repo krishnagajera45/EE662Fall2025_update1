@@ -211,10 +211,33 @@ Comprehensive documentation is available in the `docs/` directory:
 - Configuration reference
 - API documentation
 
-Build documentation (requires Sphinx):
+### Building and Viewing Sphinx Documentation
+
+**Prerequisites:**
 ```bash
-cd docs && make html
+pip install sphinx sphinx_rtd_theme
 ```
+
+**Build the documentation:**
+```bash
+cd docs
+make html
+```
+
+**Open the documentation:**
+After building, open the generated HTML documentation:
+```bash
+# On macOS:
+open _build/html/index.html
+
+# On Linux:
+xdg-open _build/html/index.html
+
+# Or simply navigate to:
+# docs/_build/html/index.html in your file browser
+```
+
+The documentation will open in your default web browser with a complete reference guide to the protocol, configuration options, and usage examples.
 
 ## Academic Context
 

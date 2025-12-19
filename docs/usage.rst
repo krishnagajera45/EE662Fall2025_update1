@@ -190,25 +190,8 @@ Packet Loss Analysis
 To analyze packet loss impact, you need to run simulations with different loss rates:
 
 1. **Manual Method**: Run simulations with different ``PACKET_LOSS_RATE`` values and collect join times
-2. **Create JSON**: Create ``packet_loss_analysis.json`` with format:
 
-.. code-block:: json
-
-   {
-       "0": {
-           "avg_join_time": 45.2,
-           "min_join_time": 12.1,
-           "max_join_time": 89.5,
-           "median_join_time": 43.8
-       },
-       "0.0001": {
-           "avg_join_time": 48.5,
-           ...
-       },
-       ...
-   }
-
-3. **Generate Plot**: Run ``generate_all_plots.py`` to create the plot
+2. **Generate Plot**: Run ``generate_all_plots.py`` to create the plot
 
 Analysis Workflow
 -----------------

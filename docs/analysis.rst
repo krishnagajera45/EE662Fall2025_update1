@@ -315,7 +315,7 @@ Useful for:
 * Estimating network capacity
 
 Configuration Parameters Analysis
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Function**: ``plot_config_parameters()``
 **File**: ``config_parameters.png``
