@@ -37,7 +37,11 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'sphinx_rtd_theme'
-html_static_path = ['_static']
+# Only include html_static_path if the directory exists
+if os.path.exists('_static'):
+    html_static_path = ['_static']
+else:
+    html_static_path = []
 html_theme_options = {
     'prev_next_buttons_location': 'bottom',
     'style_external_links': False,
