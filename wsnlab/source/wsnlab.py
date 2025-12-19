@@ -7,7 +7,7 @@ import inspect
 import random
 import simpy
 from simpy.util import start_delayed
-from source import config
+from . import config
 
 ###########################################################
 class Addr:
@@ -199,6 +199,9 @@ class Node:
                bool: returns True if the given package is proper to receive .
         """
         dest = pck['next_hop'] if 'next_hop' in pck.keys() else pck['dest']
+        # Fix: Check if dest is None before calling methods on it
+        if dest is None:
+            return False
         if dest.is_equal(BROADCAST_ADDR):  # if destination address is broadcast address
             return True
         if self.addr is not None:  # if node's address is assigned

@@ -1232,11 +1232,16 @@ class SensorNode(wsn.Node):
         if self.role != Roles.UNREGISTERED:
             return
 
+        # Reduce cooldown for isolated nodes with many failed attempts
+        adaptive_cooldown = self.trigger_ch_creation_cooldown
+        if hasattr(self, 'failed_join_attempts') and self.failed_join_attempts >= 5:
+            adaptive_cooldown = 20.0  # Reduce cooldown to 20s for very isolated nodes
+            
         if self.last_trigger_ch_creation_time is not None:
             time_since_last = self.now - self.last_trigger_ch_creation_time
-            if time_since_last < self.trigger_ch_creation_cooldown:
+            if time_since_last < adaptive_cooldown:
                 if config.ENABLE_CLUSTER_DEBUG:
-                    self.log(f"[CH_CREATION] Node {self.id}: Rate-limiting TRIGGER_CH_CREATION (last sent {time_since_last:.1f}s ago, cooldown={self.trigger_ch_creation_cooldown}s)")
+                    self.log(f"[CH_CREATION] Node {self.id}: Rate-limiting TRIGGER_CH_CREATION (last sent {time_since_last:.1f}s ago, cooldown={adaptive_cooldown}s)")
                 return
 
         found_registered = False
@@ -1468,6 +1473,9 @@ class SensorNode(wsn.Node):
         self.th_probe = 10
         self.hop_count = 99999
         self.neighbors_table = {}
+        
+        # Update TX power to potentially boost for orphaned nodes
+        self.update_cluster_tx_power()
         self.candidate_parents_table = []
         self.child_networks_table = {}
         self.members_table = []
@@ -1872,7 +1880,7 @@ class SensorNode(wsn.Node):
             self.shutdown_node(f"Energy below minimum threshold ({config.BATTERY_ENERGY_MIN:.6f}J)")
 
     def update_cluster_tx_power(self):
-        # Update TX power based on cluster assignment.
+        # Update TX power based on cluster assignment and orphan status.
         if self.ch_addr is not None:
             cluster_id = self.ch_addr.net_addr
             self.cluster_tx_power_dbm = get_cluster_tx_power(cluster_id)
@@ -1883,7 +1891,24 @@ class SensorNode(wsn.Node):
                 self.log(msg)
                 write_log(self, msg)
         else:
-            self.tx_power_dbm = config.TX_POWER_DEFAULT
+            # Check if adaptive TX power boost is enabled for orphaned nodes
+            if (hasattr(config, 'ADAPTIVE_TX_POWER_FOR_ORPHANS') and 
+                config.ADAPTIVE_TX_POWER_FOR_ORPHANS and 
+                self.role == Roles.UNREGISTERED and
+                hasattr(self, 'failed_join_attempts') and 
+                self.failed_join_attempts >= 2):
+                
+                # Boost TX power for isolated/orphaned nodes
+                boost = getattr(config, 'ORPHAN_TX_POWER_BOOST', 5)
+                boosted_power = config.TX_POWER_DEFAULT + boost
+                self.tx_power_dbm = min(config.TX_POWER_MAX, boosted_power)
+                
+                if config.ENABLE_ENERGY_DEBUG:
+                    msg = f"[TX_POWER] Node {self.id}: ORPHAN BOOST - TX power increased to {self.tx_power_dbm}dBm (+{boost}dBm boost, {self.failed_join_attempts} failed attempts)"
+                    self.log(msg)
+                    write_log(self, msg)
+            else:
+                self.tx_power_dbm = config.TX_POWER_DEFAULT
 
     def route_and_forward_package(self, pck):
         debug_log(f"data_collection_tree.py:{2074}", "route_and_forward_package entry", {"node_id": self.id, "packet_type": pck.get('type'), "dest": format_addr(pck.get('dest')), "mesh_enabled": config.ENABLE_MESH_ROUTING, "tree_enabled": config.ENABLE_TREE_ROUTING, "route_trace": pck.get('route_trace', [])}, "A")
@@ -2508,27 +2533,46 @@ class SensorNode(wsn.Node):
                                 return
             if pck['type'] == 'TRIGGER_CH_CREATION':
                 target_gui = pck.get('target_gui')
-                if target_gui is None or target_gui == self.id:
-                    if self.ch_addr is None:
-                        temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
+                sender_gui = pck.get('gui')
+                
+                # Track CH creation requests for emergency connectivity
+                if not hasattr(self, 'ch_creation_requests'):
+                    self.ch_creation_requests = {}
+                
+                if sender_gui not in self.ch_creation_requests:
+                    self.ch_creation_requests[sender_gui] = 0
+                self.ch_creation_requests[sender_gui] += 1
+                
+                # More aggressive response for isolated nodes (multiple requests)
+                should_become_ch = (target_gui is None or target_gui == self.id) and self.ch_addr is None
+                
+                # Emergency mode: become CH if we've received multiple requests from same isolated node
+                if (not should_become_ch and 
+                    self.role == Roles.REGISTERED and 
+                    self.ch_creation_requests[sender_gui] >= 3):
+                    should_become_ch = True
+                    write_log(self, f"[CH_CREATION] Node {self.id}: EMERGENCY MODE - becoming CH due to {self.ch_creation_requests[sender_gui]} requests from isolated node {sender_gui}")
+                
+                if should_become_ch:
+                    temp_cluster_id = (self.id % (config.NUM_OF_CLUSTERS - 1)) + 1
 
-                        existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
-                        if existing_ch:
-                            write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} already exists with cluster {temp_cluster_id}, not creating duplicate")
-                            return
+                    existing_ch, existing_ch_gui = self._check_existing_ch_in_cluster(temp_cluster_id)
+                    if existing_ch:
+                        write_log(self, f"[CH_CREATION] Node {self.id}: CH {existing_ch_gui} already exists with cluster {temp_cluster_id}, not creating duplicate")
+                        return
 
-                        write_log(self, f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {pck.get('gui')}, becoming cluster head to help UNREGISTERED nodes")
-                        self.ch_addr = wsn.Addr(temp_cluster_id, 254)
-                        self.set_role(Roles.CLUSTER_HEAD, reason="TRIGGER_CH_CREATION from UNREGISTERED node")
-                        self._init_address_pool()
+                    write_log(self, f"[CH_CREATION] Node {self.id}: Received TRIGGER_CH_CREATION from {sender_gui}, becoming cluster head to help UNREGISTERED nodes")
+                    self.ch_addr = wsn.Addr(temp_cluster_id, 254)
+                    self.set_role(Roles.CLUSTER_HEAD, reason="TRIGGER_CH_CREATION from UNREGISTERED node")
+                    self._init_address_pool()
 
-                        self.send_heart_beat()
-                        if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
-                            self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
-                            self.heartbeat_timer_active = True
+                    self.send_heart_beat()
+                    if not hasattr(self, 'heartbeat_timer_active') or not self.heartbeat_timer_active:
+                        self.set_timer('TIMER_HEART_BEAT', config.HEARTH_BEAT_TIME_INTERVAL)
+                        self.heartbeat_timer_active = True
 
-                        if config.ENABLE_MULTIHOP_DISCOVERY:
-                            self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
+                    if config.ENABLE_MULTIHOP_DISCOVERY:
+                        self.set_timer('TIMER_NEIGHBOR_SHARE', config.NEIGHBOR_SHARE_INTERVAL)
 
                         self.send_network_request()
                     else:
@@ -2842,6 +2886,9 @@ class SensorNode(wsn.Node):
             if len(self.candidate_parents_table) == 0:
                 self.send_probe()
                 self.failed_join_attempts += 1
+                
+                # Update TX power after failed attempts (adaptive boost)
+                self.update_cluster_tx_power()
 
                 if config.ENABLE_CLUSTER_DEBUG and self.failed_join_attempts % 10 == 0:
                     total_neighbors = len(self.neighbors_table)

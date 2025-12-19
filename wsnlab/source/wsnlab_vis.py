@@ -1,7 +1,7 @@
 """Visualisation of wsnlab library. Based on wsnsimpy_tk. Used package instead of message by Mustafa Tosun.
 """
-from source import wsnlab
-from source.wsnlab import *
+from . import wsnlab
+from .wsnlab import *
 from threading import Thread
 from topovis import Scene
 from topovis.TkPlotter import Plotter

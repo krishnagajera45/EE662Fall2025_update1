@@ -1,246 +1,248 @@
 #!/usr/bin/env python3
 """
-Script to run Fig. 7 experiment: Impact of initial energy budget on lifetime metrics.
-Runs simulations with 4 different energy budgets: 0.5J, 1.0J, 2.0J, 3.0J
+Figure 7 Experiment: Average Remaining Energy Over Time
+CT+Mesh vs CT-only comparison
+
+Runs two simulations:
+1. CT-only (ENABLE_MULTIHOP_DISCOVERY = False)
+2. CT+Mesh (ENABLE_MULTIHOP_DISCOVERY = True)
+
+Tracks average remaining energy over time (0-1000s) to match reference figure.
 """
 
 import subprocess
-import sys
 import os
+import time
+import json
+from pathlib import Path
 import re
 import shutil
-from pathlib import Path
-from datetime import datetime
-import time
 
-CONFIG_FILE = "wsnlab/source/config.py"
-SIMULATION_SCRIPT = "wsnlab/data_collection_tree.py"
+BASE_DIR = Path(__file__).parent.absolute()
+WSNLAB_DIR = BASE_DIR / "wsnlab"
+CONFIG_FILE = WSNLAB_DIR / "source" / "config.py"
+SIMULATION_SCRIPT = WSNLAB_DIR / "data_collection_tree.py"
 
-class ConfigModifier:
-    """Helper class to modify config.py safely."""
+def update_config(multihop_enabled, energy_budget=2.0, sim_duration=5000):
+    """
+    Update config.py for Fig 7 experiment.
     
-    def __init__(self, config_path):
-        self.config_path = Path(config_path)
-        self.backup_path = self.config_path.with_suffix('.py.backup')
-        self.original_content = None
+    Args:
+        multihop_enabled: True for CT+Mesh, False for CT-only
+        energy_budget: Initial energy per node (Joules) - use ~2J to match reference
+        sim_duration: Simulation duration in seconds (5000s for extended run)
+    """
+    strategy = "CT+Mesh" if multihop_enabled else "CT-only"
+    print(f"\n📝 Updating config for {strategy}:")
+    print(f"   - Multihop discovery: {multihop_enabled}")
+    print(f"   - Energy budget: {energy_budget}J")
+    print(f"   - Duration: {sim_duration}s")
     
-    def backup(self):
-        """Backup original config file."""
-        if self.config_path.exists():
-            self.original_content = self.config_path.read_text()
-            shutil.copy2(self.config_path, self.backup_path)
-            print(f"  ✓ Backed up config to {self.backup_path}")
+    with open(CONFIG_FILE, 'r') as f:
+        config_content = f.read()
     
-    def restore(self):
-        """Restore original config file."""
-        if self.backup_path.exists() and self.original_content:
-            self.config_path.write_text(self.original_content)
-            self.backup_path.unlink()
-            print(f"  ✓ Restored original config")
+    # Update multihop discovery
+    config_content = re.sub(
+        r'ENABLE_MULTIHOP_DISCOVERY = (True|False).*',
+        f'ENABLE_MULTIHOP_DISCOVERY = {multihop_enabled}  # Fig 7: {strategy}',
+        config_content
+    )
     
-    def set_value(self, var_name, value):
-        """Set a configuration variable to a new value."""
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
-        
-        content = self.config_path.read_text()
-        lines = content.split('\n')
-        new_lines = []
-        found = False
-        
-        pattern = rf'^({re.escape(var_name)}\s*=\s*)([^\n#]+?)(\s*#.*)?$'
-        
-        for line in lines:
-            if line.lstrip().startswith('#'):
-                new_lines.append(line)
-                continue
-            
-            match = re.match(pattern, line)
-            if match:
-                comment = match.group(3) if match.group(3) else ""
-                new_line = f"{match.group(1)}{value}{comment}"
-                new_lines.append(new_line)
-                found = True
-                print(f"  ✓ Updated {var_name} = {value}")
-            else:
-                new_lines.append(line)
-        
-        if not found:
-            print(f"  ⚠️  Variable {var_name} not found in config")
-            return False
-        
-        new_content = '\n'.join(new_lines)
-        self.config_path.write_text(new_content)
-        return True
+    # Update simulation duration
+    config_content = re.sub(
+        r'SIM_DURATION = \d+.*',
+        f'SIM_DURATION = {sim_duration}  # Fig 7: Energy depletion comparison',
+        config_content
+    )
+    
+    # Update energy budget
+    config_content = re.sub(
+        r'BATTERY_ENERGY_TOTAL = [\d.]+.*',
+        f'BATTERY_ENERGY_TOTAL = {energy_budget}  # Fig 7: Match reference (~2J)',
+        config_content
+    )
+    
+    # Update baseline current (use realistic value for energy depletion)
+    config_content = re.sub(
+        r'BASELINE_CURRENT = [\d.]+.*',
+        f'BASELINE_CURRENT = 0.0015  # Fig 7: ~1.5mA for realistic depletion',
+        config_content
+    )
+    
+    # Update traffic interval (moderate traffic)
+    config_content = re.sub(
+        r'DATA_PACKET_INTERVAL = [\d.]+.*',
+        f'DATA_PACKET_INTERVAL = 10  # Fig 7: Moderate traffic',
+        config_content
+    )
+    
+    # Disable visualization for speed
+    config_content = re.sub(
+        r'SIM_VISUALIZATION = (True|False).*',
+        'SIM_VISUALIZATION = False  # Fig 7: Faster simulation',
+        config_content
+    )
+    
+    # No packet loss
+    config_content = re.sub(
+        r'PACKET_LOSS_RATE = [\d.]+.*',
+        'PACKET_LOSS_RATE = 0  # Fig 7: No artificial loss',
+        config_content
+    )
+    
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(config_content)
+    
+    print("   ✓ Config updated")
 
-
-def run_simulation(energy_budget, run_num, total_runs):
-    """Run a single simulation with specified energy budget."""
+def run_simulation(strategy_name, multihop_enabled):
+    """
+    Run a single simulation and save results.
+    
+    Returns:
+        success: True if simulation completed successfully
+    """
     print(f"\n{'='*70}")
-    print(f"Run {run_num}/{total_runs}: Energy Budget = {energy_budget}J")
-    print(f"{'='*70}")
+    print(f"🚀 Starting simulation: {strategy_name}")
+    print(f"{'='*70}\n")
     
-    try:
-        result = subprocess.run(
-            [sys.executable, SIMULATION_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=1800,  # 30 minute timeout
-            env={**os.environ, 'PYTHONUNBUFFERED': '1'}
-        )
-        
-        if result.returncode != 0:
-            print(f"  ❌ Simulation failed!")
-            if result.stderr:
-                print(f"  Error: {result.stderr[:300]}")
-            return False
-        
-        print(f"  ✓ Simulation completed")
-        return True
-        
-    except subprocess.TimeoutExpired:
-        print(f"  ❌ Simulation timed out!")
-        return False
-    except Exception as e:
-        print(f"  ❌ Error: {e}")
-        return False
-
-
-def generate_plots():
-    """Generate Figure 7 plot."""
-    print(f"\n{'='*70}")
-    print("GENERATING FIGURE 7 PLOT")
-    print(f"{'='*70}")
+    # Update configuration
+    update_config(multihop_enabled, energy_budget=2.0, sim_duration=5000)
     
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", 
-             "from generate_all_plots import plot_fig7_energy_impact_on_lifetime_metrics; plot_fig7_energy_impact_on_lifetime_metrics()"],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        
-        if result.returncode != 0:
-            print(f"  ❌ Plot generation failed!")
-            if result.stderr:
-                print(f"  Error: {result.stderr[:300]}")
-            return False
-        
-        print(f"  ✓ Figure 7 plot generated successfully")
-        return True
-        
-    except Exception as e:
-        print(f"  ❌ Plot generation failed: {e}")
-        return False
-
-
-def main():
-    """Main function."""
-    print("="*70)
-    print("FIG. 7 EXPERIMENT: Impact of Initial Energy Budget on Lifetime Metrics")
-    print("="*70)
-    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70)
-    print("\nThis will run simulations with 4 different energy budgets:")
-    print("  - 10J (very low energy - early deaths)")
-    print("  - 20J (low energy - moderate deaths)")
-    print("  - 50J (medium energy - later deaths)")
-    print("  - 100J (higher energy - latest deaths)")
-    print("\nEach simulation will track:")
-    print("  - First node death time")
-    print("  - 50% nodes dead time")
-    print("  - Network connectivity drop time")
-    print("\nTotal: 4 simulations (~2-3 hours)")
-    print("="*70)
-    
-    print("\nStarting experiment...")
-    
-    config_mod = ConfigModifier(CONFIG_FILE)
-    config_mod.backup()
-    
-    # Set base configuration for Fig. 7
-    config_mod.set_value("SIM_NODE_COUNT", "100")
-    config_mod.set_value("SIM_DURATION", "5000")
-    config_mod.set_value("ENABLE_ENERGY_MODEL", "True")
-    config_mod.set_value("ENABLE_NODE_FAILURE_RECOVERY", "False")
-    config_mod.set_value("ENABLE_NETWORK_SNAPSHOTS", "False")
-    config_mod.set_value("SIM_VISUALIZATION", "False")
-    
-    # Use standard traffic and routing
-    config_mod.set_value("DATA_PACKET_INTERVAL", "1.0")
-    config_mod.set_value("PACKET_LOSS_RATE", "0")
-    config_mod.set_value("ENABLE_MESH_ROUTING", "True")
-    config_mod.set_value("ENABLE_TREE_ROUTING", "True")
-    config_mod.set_value("BATTERY_VOLTAGE", "3.0")
-    
-    # Energy budgets to test (in Joules) - much lower values to see node deaths
-    # These values will cause nodes to die during the 5000s simulation
-    energy_budgets = [10, 20, 50, 100]  # Very low energy budgets to see death patterns
-    
-    total_runs = len(energy_budgets)
-    run_num = 0
-    successful = 0
     start_time = time.time()
     
     try:
-        for energy_budget in energy_budgets:
-            run_num += 1
+        # Run simulation
+        result = subprocess.run(
+            ['python3', 'data_collection_tree.py'],
+            cwd=str(WSNLAB_DIR),
+            capture_output=True,
+            text=True,
+            timeout=3600  # 1 hour timeout
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        if result.returncode == 0:
+            print(f"\n✅ Simulation completed in {elapsed_time/60:.1f} minutes")
             
-            # Convert energy budget to battery capacity
-            # Energy (J) = Capacity (Ah) × Voltage (V) × 3600 (s/h)
-            # Capacity (Ah) = Energy (J) / (Voltage × 3600)
-            voltage = 3.0
-            capacity_ah = energy_budget / (voltage * 3600)
+            # Save results
+            results_folder = BASE_DIR / f"results_fig7_{strategy_name.lower().replace('+', '_')}"
             
-            print(f"\n  Energy Budget: {energy_budget}J")
-            print(f"  Battery Capacity: {capacity_ah:.6f} Ah")
-            print(f"  Battery Voltage: {voltage} V")
+            # Remove old results if they exist
+            if results_folder.exists():
+                shutil.rmtree(results_folder)
             
-            # Update energy configuration
-            config_mod.set_value("BATTERY_CAPACITY", f"{capacity_ah:.6f}")
+            results_folder.mkdir(parents=True, exist_ok=True)
             
-            # Run simulation
-            if run_simulation(energy_budget, run_num, total_runs):
-                successful += 1
+            # Copy result files
+            files_to_copy = [
+                'connectivity_over_time.csv',
+                'cluster_members.csv',
+                'averagePower_by_time.csv',
+                'totalPower_by_time.csv',
+                'energy_by_node.csv',
+                'nodePower_over_time.csv'
+            ]
             
-            # Small delay between runs
-            time.sleep(2)
-        
-        # Generate Figure 7 plot
-        print(f"\n{'='*70}")
-        print(f"All simulations complete: {successful}/{total_runs} successful")
-        print(f"Generating Figure 7 plot...")
-        print(f"{'='*70}")
-        
-        plot_success = generate_plots()
-        
-        elapsed = time.time() - start_time
-        print(f"\n{'='*70}")
-        print("EXPERIMENT COMPLETE")
-        print(f"{'='*70}")
-        print(f"Total time: {elapsed/60:.1f} minutes")
-        print(f"Successful runs: {successful}/{total_runs}")
-        print(f"Plot generated: {'Yes' if plot_success else 'No'}")
-        
-        if plot_success:
-            print(f"\n✓ Check fig7_energy_impact_on_lifetime_metrics.png for results!")
-            print(f"  The plot shows how different energy budgets affect:")
-            print(f"  - First node death time (blue bars)")
-            print(f"  - 50% nodes dead time (red bars)")
-            print(f"  - Network connectivity drop time (brown bars)")
-        
-        print(f"{'='*70}")
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user!")
+            import glob
+            for pattern in files_to_copy:
+                file_path = WSNLAB_DIR / pattern
+                if file_path.exists():
+                    shutil.copy2(file_path, results_folder / pattern)
+            
+            # Copy log files
+            for log_file in glob.glob(str(WSNLAB_DIR / "wsn_log*.log")):
+                shutil.copy2(log_file, results_folder / Path(log_file).name)
+            
+            # Create metadata
+            metadata = {
+                'strategy': strategy_name,
+                'multihop_enabled': multihop_enabled,
+                'energy_budget': 2.0,
+                'sim_duration': 5000,
+                'baseline_current': 0.0015,
+                'data_packet_interval': 10,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'elapsed_time_minutes': elapsed_time / 60
+            }
+            
+            with open(results_folder / 'simulation_metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            print(f"   📁 Results saved to: {results_folder.name}")
+            return True
+            
+        else:
+            print(f"\n❌ Simulation failed with return code {result.returncode}")
+            print(f"Error output: {result.stderr[:500]}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print(f"\n⏱️  Simulation timed out after 1 hour")
+        return False
     except Exception as e:
-        print(f"\n\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        config_mod.restore()
+        print(f"\n❌ Error running simulation: {e}")
+        return False
 
+def main():
+    """
+    Main experiment runner for Figure 7.
+    """
+    print("\n" + "="*70)
+    print("Figure 7 Experiment: Average Remaining Energy Over Time")
+    print("CT+Mesh vs CT-only Comparison")
+    print("="*70)
+    print("\nThis experiment will:")
+    print("  1. Run CT-only simulation (multihop disabled)")
+    print("  2. Run CT+Mesh simulation (multihop enabled)")
+    print("  3. Track average remaining energy over 5000 seconds")
+    print("  4. Generate comparison plot")
+    print(f"\nEstimated time: 60-90 minutes (2 simulations × 5000s)")
+    print("="*70)
+    
+    start_time_total = time.time()
+    
+    # Run CT-only simulation
+    success1 = run_simulation("CT-only", multihop_enabled=False)
+    
+    if success1:
+        print(f"\n⏸️  Pausing 5 seconds before next simulation...")
+        time.sleep(5)
+    
+    # Run CT+Mesh simulation
+    success2 = run_simulation("CT+Mesh", multihop_enabled=True)
+    
+    # Summary
+    elapsed_total = time.time() - start_time_total
+    
+    print(f"\n\n{'='*70}")
+    print(f"✅ EXPERIMENTS COMPLETED!")
+    print(f"{'='*70}")
+    print(f"\nTotal time: {elapsed_total/60:.1f} minutes")
+    print(f"\nResults:")
+    print(f"  {'✓' if success1 else '✗'} CT-only simulation")
+    print(f"  {'✓' if success2 else '✗'} CT+Mesh simulation")
+    
+    print(f"\n{'='*70}")
+    print(f"Now generating plot...")
+    print(f"{'='*70}\n")
+    
+    # Generate plot
+    try:
+        subprocess.run(
+            ['python3', str(BASE_DIR / 'generate_all_plots.py'), '--fig7'],
+            check=True
+        )
+        print("\n✅ Plot generated successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"\n⚠️  Error generating plot: {e}")
+    
+    print(f"\n{'='*70}")
+    print(f"Figure 7 experiment complete!")
+    print(f"Check 'results_fig7_*' folders for detailed results")
+    print(f"Check 'fig7_avg_energy_ct_comparison.png' for the plot")
+    print(f"{'='*70}\n")
 
 if __name__ == "__main__":
     main()
