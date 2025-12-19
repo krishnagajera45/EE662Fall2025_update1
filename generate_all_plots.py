@@ -3066,7 +3066,7 @@ def plot_fig5_packets_sent_vs_delivered():
     
     ax.set_xlabel('Packets Sent [packets]', fontsize=13, fontweight='bold')
     ax.set_ylabel('Packets Delivered [packets]', fontsize=13, fontweight='bold')
-    ax.set_title('Fig. 5: Network lifetime as a function of the initial energy\nbudget E₀ per node, for different traffic loads',
+    ax.set_title('Fig. 5: Network lifetime as a function of the initial energy\nbudget E₀ per node, for different traffic loads', 
                  fontsize=13, fontweight='bold')
     ax.legend(loc='upper left', fontsize=11, framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -3618,11 +3618,11 @@ def plot_fig8_pdr_over_time():
     
     # If no Fig 8 specific folders, use any results folders
     if not fig8_folders:
-        folders = find_results_folders()
-        if len(folders) == 0:
+    folders = find_results_folders()
+    if len(folders) == 0:
             print("    Warning: No result folders found")
             print("    Run: python3 run_fig8_multi_experiment.py")
-            return
+        return
         fig8_folders = [Path(f[0]) if not isinstance(f[0], Path) else f[0] for f in folders]
     
     fig, ax = plt.subplots(figsize=(12, 8))
@@ -3679,7 +3679,7 @@ def plot_fig8_pdr_over_time():
                 
                 ax.plot(times, pdr_values, linewidth=2.5, label=scenario_name, 
                        color=color, marker=marker, markersize=5, markevery=5, alpha=0.85)
-                has_data = True
+            has_data = True
                 
                 avg_pdr = np.mean(pdr_values)
                 print(f"    {scenario_name}: {len(times)} points, avg PDR={avg_pdr:.1f}%")
@@ -4265,4 +4265,4 @@ if __name__ == "__main__":
             print("Available options: --fig8, --fig5, --fig6, --fig7, or no args for all plots")
     else:
         # Generate all plots by default
-        main()
+    main()

@@ -15,7 +15,7 @@ from datetime import datetime
 CONFIG_FILE = "wsnlab/source/config.py"
 SIMULATION_SCRIPT = "wsnlab/data_collection_tree.py"
 PLOT_SCRIPT = "generate_all_plots.py"
-
+    
 def main():
     """Main function."""
     print("="*70)
@@ -39,7 +39,7 @@ def main():
         if response != 'y':
             print("Cancelled.")
             return
-    else:
+                else:
         print("\nAuto-starting (non-interactive mode)...")
     
     print("\nRunning simulation...")
@@ -68,7 +68,7 @@ def main():
     except Exception as e:
         print(f"  ❌ Error: {e}")
         return False
-    
+
     # Generate Fig. 11 plot
     print("\nGenerating Fig. 11 plot...")
     

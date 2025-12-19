@@ -1,147 +1,157 @@
-
 import math
 
-## network properties
-BROADCAST_NET_ADDR = 255
-BROADCAST_NODE_ADDR = 255
-TOTAL_BITS = 16  # Total bits for addressing
+# ============================================================================
+# NETWORK ADDRESSING
+# ============================================================================
+BROADCAST_NET_ADDR = 255  # Network address for broadcast messages
+BROADCAST_NODE_ADDR = 255  # Node address for broadcast messages
+TOTAL_BITS = 16  # Total bits available for network addressing
 
+# ============================================================================
+# NODE PROPERTIES
+# ============================================================================
+NODE_TX_RANGE = 141  # Transmission range of nodes in meters
+NODE_ARRIVAL_MAX = 50  # Maximum time delay before node wakes up (seconds)
 
+# ============================================================================
+# CLUSTER FORMATION
+# ============================================================================
+MAX_CHILD_NODES_ALLOWED_PER_CLUSTER = 20  # Maximum number of child nodes per cluster head
+bits_child = math.ceil(math.log2(MAX_CHILD_NODES_ALLOWED_PER_CLUSTER))  # Bits needed for child node addressing
+bits_cluster = TOTAL_BITS - bits_child  # Bits available for cluster network addressing
+NUM_OF_CLUSTERS = (1 << bits_cluster) - 1  # Maximum number of clusters that can be created
+NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER  # Legacy alias for backward compatibility
 
+# ============================================================================
+# SIMULATION SETTINGS
+# ============================================================================
+SIM_NODE_COUNT = 100  # Total number of nodes in the simulation
+SIM_NODE_PLACING_CELL_SIZE = 93  # Grid cell size for node placement (meters)
+SIM_DURATION = 5000  # Total simulation duration (seconds)
+SIM_TIME_SCALE = 0.00001  # Real-time scaling factor (seconds per simulation second)
+SIM_TERRAIN_SIZE = (1200, 1200)  # Size of simulation terrain (width, height in meters)
+SIM_TITLE = 'Data Collection Tree'  # Title displayed in visualization window
+SIM_VISUALIZATION = True  # Enable/disable visualization window
+SCALE = 0.8  # Scale factor applied to visualization and node spacing
+SIM_SEED = 50  # Random seed for reproducible simulation results
+SIM_BACKGROUND_COLOR = 'white'  # Background color for visualization window
 
-## node properties
-NODE_TX_RANGE = 141  # transmission range of nodes (increased to fix isolated nodes connectivity)
-NODE_ARRIVAL_MAX = 50  # max time to wake up (reduced for faster network formation and isolated node startup)
+# ============================================================================
+# APPLICATION PROTOCOL
+# ============================================================================
+HEARTH_BEAT_TIME_INTERVAL = 3  # Time interval between heartbeat messages (seconds)
+REPAIRING_METHOD = 'FIND_ANOTHER_PARENT'  # Method for network repair: 'FIND_ANOTHER_PARENT' or 'ALL_ORPHAN'
+EXPORT_CH_CSV_INTERVAL = 10  # Interval for exporting cluster head data to CSV (simulation time)
+EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # Interval for exporting neighbor data to CSV (simulation time)
 
-## cluster formation controls
-MAX_CHILD_NODES_ALLOWED_PER_CLUSTER = 20  # Maximum child nodes per cluster (controls cluster size and topology)
-bits_child = math.ceil(math.log2(MAX_CHILD_NODES_ALLOWED_PER_CLUSTER))
-bits_cluster = TOTAL_BITS - bits_child
-NUM_OF_CLUSTERS = (1 << bits_cluster) - 1  # Maximum number of clusters
+# ============================================================================
+# NEIGHBOR DISCOVERY
+# ============================================================================
+ENABLE_MULTIHOP_DISCOVERY = True  # Enable multi-hop neighbor discovery mechanism
+MAX_HOP_DISTANCE = 3  # Maximum hop distance for neighbor discovery
+NEIGHBOR_SHARE_INTERVAL = 30  # Time interval for sharing neighbor information (simulation time)
+ENABLE_NEIGHBOR_DEBUG = True  # Enable debug logging for neighbor discovery
 
-# Legacy alias for backward compatibility
-NUM_OF_CHILDREN = MAX_CHILD_NODES_ALLOWED_PER_CLUSTER
+# ============================================================================
+# ROUTING & DEBUG
+# ============================================================================
+ENABLE_LOG_FILE = True  # Enable writing simulation events to log file
+ENABLE_ROUTING_DEBUG = True  # Enable debug logging for mesh/tree routing
+ENABLE_CLUSTER_DEBUG = True  # Enable debug logging for cluster and member tables
+ENABLE_MESH_ROUTING = True  # Enable mesh routing (tries mesh first, then tree)
+ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh routing fails)
+ENABLE_PACKET_VISUALIZATION = True  # Enable visualization of packet traces during simulation
+PACKET_TRACE_DURATION = 10.0  # Duration to keep packet trace lines visible (seconds)
 
+# ============================================================================
+# DATA TRAFFIC
+# ============================================================================
+DATA_PACKET_INTERVAL = 10  # Time interval between data packet transmissions per node (seconds)
 
-## simulation properties
-SIM_NODE_COUNT = 100  # node count in simulation
-SIM_NODE_PLACING_CELL_SIZE = 93  # increased spacing to reduce overlap (was 75)
-SIM_DURATION = 5000  # simulation Duration in seconds
-SIM_TIME_SCALE = 0.00001  #  The real time dureation of 1 second simualtion time
-SIM_TERRAIN_SIZE = (1200, 1200)  # terrain size
-SIM_TITLE = 'Data Collection Tree'  # title of visualization window
-SIM_VISUALIZATION = True  # visualization active
-SCALE = 0.8  # scale factor for visualization
-SIM_SEED = 50 # Random seed for reproducible simulations
-SIM_BACKGROUND_COLOR = 'white'  # Background color for simulation window: 'white', 'lightgray', '#F0F0F0', etc.
+# ============================================================================
+# CHANNEL MODEL
+# ============================================================================
+PACKET_LOSS_RATE = 0  # Packet loss rate (0.0 to 1.0, where 1.0 = 100% loss)
+ENABLE_PACKET_LOSS_DEBUG = True  # Enable debug logging for packet loss events
 
-
-## application properties
-HEARTH_BEAT_TIME_INTERVAL = 3  # Reduced to 3 for fastest neighbor discovery and isolated node connectivity
-REPAIRING_METHOD = 'FIND_ANOTHER_PARENT' # 'ALL_ORPHAN', 'FIND_ANOTHER_PARENT'
-EXPORT_CH_CSV_INTERVAL = 10  # simulation time units;
-EXPORT_NEIGHBOR_CSV_INTERVAL = 10  # simulation time units;
-
-## neighbor discovery properties
-ENABLE_MULTIHOP_DISCOVERY = True  # Enable multi-hop neighbor discovery
-MAX_HOP_DISTANCE = 3  # Maximum hop distance to track neighbors
-NEIGHBOR_SHARE_INTERVAL = 30  # How often to share neighbor info (simulation time)
-ENABLE_NEIGHBOR_DEBUG = True  # Toggle for neighbor discovery debug logs
-
-## routing & debug toggles
-ENABLE_LOG_FILE = True  # Write simulation events to a timestamped log
-ENABLE_ROUTING_DEBUG = True  # Mesh/tree routing debug statements
-ENABLE_CLUSTER_DEBUG = True  # Cluster/member table debug statements
-ENABLE_MESH_ROUTING = True   # Enable mesh routing (try mesh first, then tree)
-ENABLE_TREE_ROUTING = True  # Enable tree routing (fallback when mesh fails)
-# Note: If ENABLE_MESH_ROUTING = False, only tree routing will be used
-#       If ENABLE_TREE_ROUTING = False, only mesh routing will be used (may fail if no mesh route)
-ENABLE_PACKET_VISUALIZATION = True  # Visualize data packets as they travel through network
-PACKET_TRACE_DURATION = 10.0  # How long to keep packet trace lines visible (seconds)
-
-## data traffic properties
-DATA_PACKET_INTERVAL = 10  # seconds between random data injections per node
-
-## channel model / packet loss
-PACKET_LOSS_RATE = 0     # 0.0–1.0 fraction of packets randomly dropped
-ENABLE_PACKET_LOSS_DEBUG = True
-
-## network recovery properties
-ENABLE_NODE_FAILURE_RECOVERY = True  # Enable random node failures for testing recovery
-NODE_FAILURE_START_TIME = 200  # T1: When to start introducing failures (simulation time)
-NODE_FAILURE_INTERVAL = 100  # Time between random node failures
-NODE_RECOVERY_TIME_MIN = 50  # Minimum time before node recovers (T2-T3 period)
-NODE_RECOVERY_TIME_MAX = 150  # Maximum time before node recovers (T3)
+# ============================================================================
+# NETWORK RECOVERY
+# ============================================================================
+ENABLE_NODE_FAILURE_RECOVERY = True  # Enable random node failures for testing recovery algorithms
+NODE_FAILURE_START_TIME = 200  # Simulation time when node failures begin (T1)
+NODE_FAILURE_INTERVAL = 100  # Time interval between consecutive node failures (seconds)
+NODE_RECOVERY_TIME_MIN = 50  # Minimum time before failed node recovers (T2-T3 period)
+NODE_RECOVERY_TIME_MAX = 150  # Maximum time before failed node recovers (T3)
 NUM_NODES_TO_FAIL = 2  # Number of random nodes to fail during simulation
-ENABLE_RECOVERY_DEBUG = True  # Toggle for recovery debug logs
+ENABLE_RECOVERY_DEBUG = True  # Enable debug logging for network recovery events
 
-## visual highlight properties (for easy snapshot comparison)
-FAILURE_HIGHLIGHT_DURATION = 10  # How long to keep failed nodes RED (seconds) - makes T1 snapshots obvious
-ORPHAN_HIGHLIGHT_DURATION = 10  # How long to keep orphaned nodes ORANGE (seconds) - makes T1-T2 snapshots obvious
+# ============================================================================
+# VISUALIZATION HIGHLIGHTS
+# ============================================================================
+FAILURE_HIGHLIGHT_DURATION = 10  # Duration to highlight failed nodes in red (seconds)
+ORPHAN_HIGHLIGHT_DURATION = 10  # Duration to highlight orphaned nodes in orange (seconds)
 
-## network snapshot properties (for recovery algorithm testing - class notes methodology)
-ENABLE_NETWORK_SNAPSHOTS = True  # Enable network state snapshots (CSV + PNG)
-SNAPSHOT_FOLDER = "snapshots"  # Folder name to store all snapshot PNG files
-CAPTURE_SIMULATION_WINDOW = True  # If True, capture actual simulation window (requires PIL/Pillow). If False, use matplotlib visualization
+# ============================================================================
+# NETWORK SNAPSHOTS
+# ============================================================================
+ENABLE_NETWORK_SNAPSHOTS = True  # Enable network state snapshots (CSV and PNG files)
+SNAPSHOT_FOLDER = "snapshots"  # Folder name for storing snapshot PNG files
+CAPTURE_SIMULATION_WINDOW = True  # Capture actual simulation window (requires PIL/Pillow)
 SNAPSHOT_BEFORE_T1 = True  # Take snapshot before T1 (baseline network state)
 SNAPSHOT_AT_T1 = True  # Take snapshot at T1 (when failures occur)
-SNAPSHOT_T1_T2_AFTER_FAILURE = True  # Take snapshot between T1-T2 (after failure, show orphans)
-SNAPSHOT_T1_T2_DELAY = 5  # Delay after T1 to take T1-T2 snapshot (seconds)
+SNAPSHOT_T1_T2_AFTER_FAILURE = True  # Take snapshot between T1-T2 (after failure, shows orphans)
+SNAPSHOT_T1_T2_DELAY = 5  # Delay after T1 before taking T1-T2 snapshot (seconds)
 SNAPSHOT_T2_T3_RECOVERY = True  # Take snapshot during T2-T3 (recovery in progress)
-SNAPSHOT_AT_T3_AFTER_RECOVERY = True  # Take snapshot at T3 (after recovery)
-SNAPSHOT_AFTER_T3_INTERVAL = 50  # Interval for snapshots after T3 (seconds)
+SNAPSHOT_AT_T3_AFTER_RECOVERY = True  # Take snapshot at T3 (after recovery completes)
+SNAPSHOT_AFTER_T3_INTERVAL = 50  # Time interval for snapshots after T3 (seconds)
 SNAPSHOT_AFTER_T3_COUNT = 3  # Number of snapshots to take after T3
 SNAPSHOT_FINAL_STATE = True  # Take final snapshot at simulation end
 
-## router / CH transfer properties (for overlap reduction)
-ENABLE_CH_TRANSFER = True  # Enable CH role transfer to reduce cluster overlap
-MIN_MEMBERS_FOR_TRANSFER = 1  # Minimum members before CH can transfer role (allows early transfer to reduce overlap)
+# ============================================================================
+# CLUSTER HEAD TRANSFER
+# ============================================================================
+ENABLE_CH_TRANSFER = True  # Enable cluster head role transfer to reduce cluster overlap
+MIN_MEMBERS_FOR_TRANSFER = 1  # Minimum number of members required before CH can transfer role
 
-## cluster head creation properties
-ENABLE_PROACTIVE_CH_CREATION = True  # Allow REGISTERED nodes to proactively become cluster heads (enabled for isolated nodes)
-PROACTIVE_CH_TIMER = 20  # Time (seconds) after registration before isolated REGISTERED node can become CH (aggressive for isolated nodes)
-UNREGISTERED_CH_TRIGGER_THRESHOLD = 1  # Number of failed join attempts before UNREGISTERED node triggers CH creation (very aggressive for connectivity)
-ADAPTIVE_TX_POWER_FOR_ORPHANS = True  # Boost TX power for isolated nodes
-ORPHAN_TX_POWER_BOOST = 15  # dBm boost for orphaned nodes (maximum boost to help all isolated nodes)
+# ============================================================================
+# CLUSTER HEAD CREATION
+# ============================================================================
+ENABLE_PROACTIVE_CH_CREATION = True  # Allow registered nodes to proactively become cluster heads
+PROACTIVE_CH_TIMER = 20  # Time after registration before node can become CH (seconds)
+UNREGISTERED_CH_TRIGGER_THRESHOLD = 1  # Failed join attempts before unregistered node creates CH
+ADAPTIVE_TX_POWER_FOR_ORPHANS = True  # Automatically boost transmission power for isolated nodes
+ORPHAN_TX_POWER_BOOST = 15  # Transmission power boost for orphaned nodes (dBm)
 
-## energy model properties (CC2420 radio)
+# ============================================================================
+# ENERGY MODEL (CC2420 Radio)
+# ============================================================================
 ENABLE_ENERGY_MODEL = True  # Enable energy consumption tracking and node shutdown
-ENABLE_ENERGY_DEBUG = True  # Debug logs for energy consumption
-
-# CC2420 Radio Specifications
-CC2420_DATA_RATE = 250000  # bits per second (250 kbps)
-CC2420_VOLTAGE = 3.0  # Volts
-CC2420_PHY_OVERHEAD = 6  # bytes (4 preamble + 1 SFD + 1 PHR)
-CC2420_PLL_OVERHEAD_ENERGY = 10e-6  # Joules (10 µJ for RX/TX PLL turnaround)
-
-# TX Power Levels (dBm) and corresponding currents (mA) for CC2420
+ENABLE_ENERGY_DEBUG = True  # Enable debug logging for energy consumption
+CC2420_DATA_RATE = 250000  # Radio data rate in bits per second (250 kbps)
+CC2420_VOLTAGE = 3.0  # Operating voltage in volts
+CC2420_PHY_OVERHEAD = 6  # Physical layer overhead in bytes (preamble + SFD + PHR)
+CC2420_PLL_OVERHEAD_ENERGY = 10e-6  # PLL turnaround energy overhead in Joules (10 µJ)
 TX_POWER_LEVELS = {
-    -25: 8.5,   # mA at -25 dBm
-    -15: 9.9,   # mA at -15 dBm
-    -10: 11.0,  # mA at -10 dBm
-    -5: 14.0,   # mA at -5 dBm
-    0: 17.4     # mA at 0 dBm (maximum)
+    -25: 8.5,  # Current consumption in mA at -25 dBm
+    -15: 9.9,  # Current consumption in mA at -15 dBm
+    -10: 11.0,  # Current consumption in mA at -10 dBm
+    -5: 14.0,  # Current consumption in mA at -5 dBm
+    0: 17.4  # Current consumption in mA at 0 dBm (maximum power)
 }
-
-# TX Power Configuration
-TX_POWER_MIN = -25  # Minimum TX power in dBm
-TX_POWER_MAX = 0     # Maximum TX power in dBm
-TX_POWER_DEFAULT = 0  # Default TX power in dBm (used if per-cluster power not set)
+TX_POWER_MIN = -25  # Minimum transmission power in dBm
+TX_POWER_MAX = 0  # Maximum transmission power in dBm
+TX_POWER_DEFAULT = 0  # Default transmission power in dBm
 USE_GLOBAL_TX_POWER = False  # If True, all nodes use same TX power; if False, per-cluster power
+CC2420_RX_CURRENT = 18.8  # Receive current consumption in mA
+BATTERY_VOLTAGE = 3.0  # Battery voltage in volts (two AA alkaline batteries)
+BATTERY_CAPACITY = 2000  # Battery capacity in mAh
+BATTERY_ENERGY_TOTAL = BATTERY_VOLTAGE * BATTERY_CAPACITY * 3600 / 1000  # Total battery energy in Joules
+BATTERY_ENERGY_MIN = BATTERY_ENERGY_TOTAL * 0.01  # Minimum energy threshold (1% of total) for node shutdown
+BASELINE_CURRENT = 0.0001  # Baseline current consumption when node is idle/sleeping (100 µA)
 
-# RX Current for CC2420
-CC2420_RX_CURRENT = 18.8  # mA (receive current)
-
-# Battery Configuration (Two AA Alkaline Batteries)
-BATTERY_VOLTAGE = 3.0  # Volts
-BATTERY_CAPACITY = 2000  # mAh
-BATTERY_ENERGY_TOTAL = BATTERY_VOLTAGE * BATTERY_CAPACITY * 3600 / 1000  # Joules (3.0V * 2.0Ah * 3600s/h)
-BATTERY_ENERGY_MIN = BATTERY_ENERGY_TOTAL * 0.01  # Minimum energy threshold (1% of total) - node shuts down below this
-
-# Baseline Current (when node is idle/sleeping)
-BASELINE_CURRENT = 0.0001  # Amperes (100 µA) - baseline power consumption when not transmitting/receiving
-
-# Cluster Optimization
+# ============================================================================
+# CLUSTER OPTIMIZATION
+# ============================================================================
 ENABLE_CLUSTER_OPTIMIZATION = True  # Enable cluster optimization protocol
-CLUSTER_OPTIMIZATION_MODE = 'ENERGY'  # 'CLUSTERS' to minimize number of clusters, 'ENERGY' to minimize energy consumption
-CLUSTER_OPTIMIZATION_INTERVAL = 100  # How often to run optimization (simulation time)
+CLUSTER_OPTIMIZATION_MODE = 'ENERGY'  # Optimization mode: 'ENERGY' or 'CLUSTERS'
+CLUSTER_OPTIMIZATION_INTERVAL = 100  # Time interval between optimization runs (simulation time)

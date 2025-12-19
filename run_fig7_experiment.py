@@ -177,7 +177,7 @@ def run_simulation(strategy_name, multihop_enabled):
             print(f"\n❌ Simulation failed with return code {result.returncode}")
             print(f"Error output: {result.stderr[:500]}")
             return False
-            
+        
     except subprocess.TimeoutExpired:
         print(f"\n⏱️  Simulation timed out after 1 hour")
         return False
@@ -223,11 +223,11 @@ def main():
     print(f"\nResults:")
     print(f"  {'✓' if success1 else '✗'} CT-only simulation")
     print(f"  {'✓' if success2 else '✗'} CT+Mesh simulation")
-    
+            
     print(f"\n{'='*70}")
     print(f"Now generating plot...")
     print(f"{'='*70}\n")
-    
+            
     # Generate plot
     try:
         subprocess.run(
@@ -238,7 +238,7 @@ def main():
     except subprocess.CalledProcessError as e:
         print(f"\n⚠️  Error generating plot: {e}")
     
-    print(f"\n{'='*70}")
+        print(f"\n{'='*70}")
     print(f"Figure 7 experiment complete!")
     print(f"Check 'results_fig7_*' folders for detailed results")
     print(f"Check 'fig7_avg_energy_ct_comparison.png' for the plot")

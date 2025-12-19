@@ -151,5 +151,4 @@ wsn_debug.log
 batch_simulation_results/aggregated_statistics.json
 .gitignore
 batch_simulation_results/
-*docs
 *.csv

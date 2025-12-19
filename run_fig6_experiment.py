@@ -132,7 +132,7 @@ def run_simulation(scenario_name, energy_budget, traffic_name, traffic_interval)
         
         if result.returncode == 0:
             print(f"\n✅ Simulation completed in {elapsed_time/60:.1f} minutes")
-            
+        
             # Parse network lifetime from output
             network_lifetime = None
             for line in result.stdout.split('\n'):
@@ -155,15 +155,15 @@ def run_simulation(scenario_name, energy_budget, traffic_name, traffic_interval)
             if results_folder.exists():
                 import shutil
                 shutil.rmtree(results_folder)
-            
+        
             # Move wsnlab directory contents to results folder
             wsnlab_results = WSNLAB_DIR
             results_folder.mkdir(parents=True, exist_ok=True)
             
             # Copy specific result files
             files_to_copy = [
-                'connectivity_over_time.csv',
-                'cluster_members.csv',
+            'connectivity_over_time.csv',
+            'cluster_members.csv',
                 'averagePower_by_time.csv',
                 'totalPower_by_time.csv',
                 'energy_by_node.csv',
@@ -177,7 +177,7 @@ def run_simulation(scenario_name, energy_budget, traffic_name, traffic_interval)
                     file_path = Path(file)
                     if file_path.exists():
                         shutil.copy2(file, results_folder / file_path.name)
-            
+        
             # Create metadata
             metadata = {
                 'scenario_name': scenario_name,
@@ -194,8 +194,8 @@ def run_simulation(scenario_name, energy_budget, traffic_name, traffic_interval)
             }
             
             with open(results_folder / 'simulation_metadata.json', 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
+            json.dump(metadata, f, indent=2)
+        
             print(f"   📁 Results saved to: {results_folder.name}")
             
             return network_lifetime
@@ -204,7 +204,7 @@ def run_simulation(scenario_name, energy_budget, traffic_name, traffic_interval)
             print(f"\n❌ Simulation failed with return code {result.returncode}")
             print(f"Error output: {result.stderr[:500]}")
             return None
-            
+        
     except subprocess.TimeoutExpired:
         print(f"\n⏱️  Simulation timed out after 2 hours")
         return None
